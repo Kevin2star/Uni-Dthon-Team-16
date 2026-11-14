@@ -642,6 +642,53 @@ class EnsembleModel:
         return (np.argmax(self.predict_proba(features), axis=1) + 1).astype(int)
 
 
+class ExtraTreesModel:
+    """탐색된 ExtraTrees. 결측은 학습 행의 중앙값으로 채우고, 확률 열은 1~6 순서입니다.
+
+    test.py가 가중치를 읽을 수 있도록 이 모듈에 둡니다.
+    """
+
+    def __init__(self, params: dict, seed: int, n_jobs: int):
+        self.params = dict(params)
+        self.seed = seed
+        self.n_jobs = n_jobs
+        self.model = None
+        self.median_ = None
+        self._y_offset = 0
+
+    def fit(self, features, y):
+        from sklearn.ensemble import ExtraTreesClassifier
+        y = np.asarray(y).astype(int)
+        values = _as_float(features)
+        median = np.nanmedian(values, axis=0)
+        self.median_ = np.where(np.isnan(median), 0.0, median)
+        self.model = ExtraTreesClassifier(
+            n_estimators=int(self.params['n_estimators']),
+            max_depth=self.params['max_depth'],
+            min_samples_leaf=int(self.params['min_samples_leaf']),
+            max_features=self.params['max_features'],
+            class_weight=self.params['class_weight'],
+            random_state=self.seed,
+            n_jobs=self.n_jobs,
+        )
+        self.model.fit(self._fill(values), y)
+        return self
+
+    def _fill(self, values: np.ndarray) -> np.ndarray:
+        values = values.copy()
+        missing = np.isnan(values)
+        if missing.any():
+            values[missing] = np.take(self.median_, np.where(missing)[1])
+        return values
+
+    def predict_proba(self, features) -> np.ndarray:
+        proba = self.model.predict_proba(self._fill(_as_float(features)))
+        return _align_proba(proba, self.model.classes_)
+
+    def predict(self, features) -> np.ndarray:
+        return (np.argmax(self.predict_proba(features), axis=1) + 1).astype(int)
+
+
 def make_tabular(name: str, class_weight=None, seed: int = SEED):
     if name == 'cumulative':
         return CumulativeOrdinal(class_weight, seed)

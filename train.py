@@ -23,6 +23,7 @@ os.environ.setdefault('UNID_N_JOBS', '2')
 import argparse
 import shutil
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import joblib
@@ -49,7 +50,9 @@ def read_split(data_dir: Path, split: str) -> pd.DataFrame:
 
 def prepare(frame: pd.DataFrame, data_dir: Path, split: str):
     paths = M.resolve_image_paths(frame, [data_dir / split, data_dir])
+    print(f'이미지 통계 계산 중 ({len(frame):,}장, 스레드 {M.cpu_jobs()}개)', flush=True)
     image = M.extract_image_features(frame, paths)
+    print('이미지 통계 완료', flush=True)
     features = M.build_features(frame, image)
     return paths, features
 
@@ -152,20 +155,32 @@ def fit_torch(name: str, frame: pd.DataFrame, paths: pd.Series, features: pd.Dat
     return bundle, float(np.mean(holdout_scores)), std, np.mean(class_scores, axis=0), oof
 
 
+_IMAGE_LOADER = None
+
+
+def _image_loader() -> ThreadPoolExecutor:
+    global _IMAGE_LOADER
+    if _IMAGE_LOADER is None:
+        _IMAGE_LOADER = ThreadPoolExecutor(max_workers=M.cpu_jobs())
+    return _IMAGE_LOADER
+
+
 def _batch_images(paths: pd.Series, indices, normalize: str, augment: bool, frame_index=None):
     import torch
-    images = []
+    jobs = []
+    width = 1 if frame_index is None else frame_index.shape[1]
     for index in indices:
         flip = bool(augment and np.random.random() < 0.5)
-        if frame_index is None:
-            images.append(M.load_image_tensor(paths.iloc[int(index)], normalize=normalize, flip=flip))
-        else:
-            shots = [
-                M.load_image_tensor(paths.iloc[int(frame_index[int(index), slot])], normalize=normalize, flip=flip)
-                for slot in range(frame_index.shape[1])
-            ]
-            images.append(torch.stack(shots))
-    return torch.stack(images)
+        for slot in range(width):
+            source = int(index) if frame_index is None else int(frame_index[int(index), slot])
+            jobs.append((source, flip))
+    tensors = list(_image_loader().map(
+        lambda job: M.load_image_tensor(paths.iloc[job[0]], normalize=normalize, flip=job[1]),
+        jobs,
+    ))
+    if frame_index is None:
+        return torch.stack(tensors)
+    return torch.stack([torch.stack(tensors[i:i + width]) for i in range(0, len(tensors), width)])
 
 
 def _run_epoch(network, optimizer, indices, paths, tabular, sequences, mask, y, config, batch_size, device, train_mode, frame_index=None):
@@ -241,6 +256,7 @@ def _train_one_torch(config, frame, paths, features, y, sequence_cols, train_idx
     best_class = np.zeros(6)
     best_proba = None
     for epoch in range(1, args.epochs + 1):
+        print(f'  epoch {epoch}/{args.epochs} 학습', flush=True)
         _run_epoch(network, optimizer, train_idx, paths, tabular, sequences, mask, y_np, config, args.batch_size, device, True, frame_index)
         _, prediction, proba = _run_epoch(
             network, optimizer, holdout_idx, paths, tabular, sequences, mask, y_np, config, args.batch_size, device, False, frame_index,
@@ -289,7 +305,9 @@ def _train_final_torch(config, frame, paths, features, y, sequence_cols, epochs,
         groups.append({'params': backbone_params, 'lr': 1e-5})
     optimizer = torch.optim.AdamW(groups, weight_decay=1e-4)
     indices = np.arange(len(frame))
-    for _ in range(epochs):
+    print(f'전체 재학습 {epochs} epoch', flush=True)
+    for epoch in range(1, epochs + 1):
+        print(f'  재학습 {epoch}/{epochs}', flush=True)
         _run_epoch(network, optimizer, indices, paths, tabular, sequences, mask, y.to_numpy(), config, args.batch_size, device, True, frame_index)
     network.eval()
     return network, tabular_prep, sequence_prep

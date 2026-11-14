@@ -7,7 +7,9 @@ train.py, test.py, 실험 노트북이 같은 함수를 사용합니다.
 """
 from __future__ import annotations
 
+import hashlib
 import os
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -110,7 +112,33 @@ def _blob_stats(mask: np.ndarray) -> tuple[float, float]:
     return float(count), float(sizes.max()) / float(mask.size)
 
 
+def _image_cache_file(kind: str, path, size: int) -> Path:
+    file = Path(path)
+    stat = file.stat()
+    key = hashlib.sha1(f'{file.resolve()}|{stat.st_mtime_ns}|{stat.st_size}|{size}|{kind}'.encode()).hexdigest()
+    return Path(__file__).resolve().parent / 'work' / 'image_cache' / kind / key[:2] / f'{key}.npy'
+
+
+def _save_cache(cache: Path, array: np.ndarray) -> None:
+    """같은 이미지를 여러 스레드가 저장해도 임시 파일 이름이 겹치지 않습니다."""
+    if cache.is_file():
+        return
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    temporary = cache.with_name(
+        f'{cache.stem}.{os.getpid()}.{threading.get_ident()}.tmp.npy'
+    )
+    np.save(temporary, array)
+    try:
+        os.replace(temporary, cache)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
 def _image_stats(path) -> list[float]:
+    cache = _image_cache_file('stats', path, 0)
+    if cache.is_file():
+        return np.load(cache, allow_pickle=False).astype(float).tolist()
     with Image.open(path) as img:
         arr = np.asarray(img.convert('L'), dtype=np.float32) / 255.0
     hot80 = arr >= HOT_THRESHOLD
@@ -125,7 +153,7 @@ def _image_stats(path) -> list[float]:
         cent_y = float(ys.mean() / max(arr.shape[0] - 1, 1))
     else:
         cent_x = cent_y = float('nan')
-    return [
+    values = [
         float(arr.mean()),
         float(arr.std()),
         float(arr.max()),
@@ -139,6 +167,8 @@ def _image_stats(path) -> list[float]:
         cent_x,
         cent_y,
     ]
+    _save_cache(cache, np.asarray(values, dtype=np.float64))
+    return values
 
 
 def cpu_jobs(n_jobs: int | None = None) -> int:
@@ -163,11 +193,25 @@ def extract_image_features(frame: pd.DataFrame, paths: pd.Series, n_jobs: int | 
     return pd.DataFrame(rows, columns=IMAGE_STATS, index=pd.Index(frame['sample_id'].to_numpy(), name='sample_id'))
 
 
-def load_image_tensor(path, size: int = IMAGE_SIZE, normalize: str = 'imagenet', flip: bool = False):
-    import torch
+def resized_rgb(path, size: int = IMAGE_SIZE) -> np.ndarray:
+    """224 크기 이미지를 한 번만 만들고 work/image_cache에 둡니다. 값은 원본을 줄인 것과 같습니다."""
+    cache = _image_cache_file('rgb', path, size)
+    if cache.is_file():
+        try:
+            return np.load(cache, allow_pickle=False)
+        except (OSError, ValueError):
+            pass
     with Image.open(path) as img:
         img = img.convert('RGB').resize((size, size), Image.BILINEAR)
-        array = np.asarray(img, dtype=np.float32) / 255.0
+        array = np.asarray(img, dtype=np.uint8)
+    if not cache.is_file():
+        _save_cache(cache, array)
+    return array
+
+
+def load_image_tensor(path, size: int = IMAGE_SIZE, normalize: str = 'imagenet', flip: bool = False):
+    import torch
+    array = resized_rgb(path, size).astype(np.float32) / 255.0
     tensor = torch.from_numpy(array).permute(2, 0, 1).contiguous()
     if flip:
         tensor = torch.flip(tensor, dims=[2])
@@ -744,8 +788,9 @@ class FusionNet(object):
                     if self.frames == 1:
                         parts.append(self._encode(image))
                     else:
-                        tokens = torch.stack([self._encode(image[:, t]) for t in range(image.size(1))], dim=1)
-                        parts.append(self.time_encoder(tokens).mean(dim=1))
+                        batch, frames, channels, height, width = image.shape
+                        tokens = self._encode(image.reshape(batch * frames, channels, height, width))
+                        parts.append(self.time_encoder(tokens.reshape(batch, frames, -1)).mean(dim=1))
                 if self.tabular_dim:
                     parts.append(self.tabular(tabular))
                 if self.sequence == 'gru':
