@@ -11,3 +11,4 @@ catboost>=1.2
 # torch와 torchvision은 다시 설치하지 마십시오. 다른 빌드로 바뀌면 GPU가 인식되지 않을 수 있습니다.
 torch>=2.7
 torchvision>=0.20
+timm>=1.0

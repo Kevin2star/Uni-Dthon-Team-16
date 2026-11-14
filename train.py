@@ -65,13 +65,16 @@ def cross_validate(name: str, features: pd.DataFrame, y: pd.Series, groups: pd.S
     if n_splits < 2:
         raise ValueError('GroupKFold에는 실험이 2개 이상 필요합니다.')
     scores, class_scores = [], []
+    oof = np.full((len(y), 6), np.nan, dtype=np.float32)
     for train_idx, valid_idx in GroupKFold(n_splits=n_splits).split(features, y, groups):
         estimator = M.make_tabular(name, class_weight, seed)
         estimator.fit(features.iloc[train_idx], y.iloc[train_idx])
-        prediction = estimator.predict(features.iloc[valid_idx])
+        proba = estimator.predict_proba(features.iloc[valid_idx])
+        oof[valid_idx] = proba
+        prediction = (np.argmax(proba, axis=1) + 1).astype(int)
         scores.append(macro_f1(y.iloc[valid_idx], prediction))
         class_scores.append(per_class_f1(y.iloc[valid_idx], prediction))
-    return float(np.mean(scores)), float(np.std(scores)), np.mean(class_scores, axis=0)
+    return float(np.mean(scores)), float(np.std(scores)), np.mean(class_scores, axis=0), oof
 
 
 def save_bundle(path: Path, bundle: dict) -> None:
@@ -97,30 +100,35 @@ def fit_torch(name: str, frame: pd.DataFrame, paths: pd.Series, features: pd.Dat
     from torch import nn
 
     M.set_seed(seed)
-    backbone_name, use_gru = M.deep_spec(name)
-    freeze = backbone_name != 'smallcnn' and not args.unfreeze
+    spec = M.deep_config(name)
     config = {
         'model_name': name,
-        'use_gru': use_gru,
+        'backbone': spec['backbone'],
+        'sequence': spec['sequence'],
+        'use_gru': spec['sequence'] == 'gru',
+        'use_image': spec['image'],
+        'frames': spec['frames'],
         'head': args.head,
-        'tabular_dim': features.shape[1],
+        'tabular_dim': 0 if not spec['image'] else int(features.shape[1]),
         'sensor_dim': 0,
-        'freeze_backbone': freeze,
+        'freeze_backbone': spec['backbone'] not in (None, 'smallcnn') and not args.unfreeze,
         'image_size': M.IMAGE_SIZE,
     }
-    sequence_cols = M.sequence_columns(frame) if use_gru else []
+    sequence_cols = M.sequence_columns(frame) if spec['sequence'] != 'none' else []
     config['sensor_dim'] = len(sequence_cols)
     folds = args.folds if args.folds is not None else 1
     splits = list(GroupKFold(n_splits=min(5, int(groups.nunique()))).split(features, y, groups))
     chosen = splits[:min(folds, len(splits))]
     holdout_scores, chosen_epochs, class_scores = [], [], []
+    oof = np.full((len(frame), 6), np.nan, dtype=np.float32)
     for fold, (train_idx, holdout_idx) in enumerate(chosen, start=1):
-        epochs, score, class_f1 = _train_one_torch(
+        epochs, score, class_f1, holdout_proba = _train_one_torch(
             config, frame, paths, features, y, sequence_cols, train_idx, holdout_idx, args, seed + fold,
         )
         holdout_scores.append(score)
         chosen_epochs.append(epochs)
         class_scores.append(class_f1)
+        oof[np.asarray(holdout_idx)] = holdout_proba
         print(f'  fold {fold}: holdout Macro F1 {score:.4f}, 선택 epoch {epochs}')
     final_epochs = max(1, int(np.median(chosen_epochs)))
     network, tabular_prep, sequence_prep = _train_final_torch(
@@ -129,7 +137,7 @@ def fit_torch(name: str, frame: pd.DataFrame, paths: pd.Series, features: pd.Dat
     bundle = {
         'kind': 'torch',
         'model_name': name,
-        'features': list(features.columns),
+        'features': [] if not spec['image'] else list(features.columns),
         'sequence_cols': sequence_cols,
         'tabular_prep': tabular_prep,
         'sequence_prep': sequence_prep,
@@ -141,36 +149,45 @@ def fit_torch(name: str, frame: pd.DataFrame, paths: pd.Series, features: pd.Dat
     }
     del torch, nn
     std = float(np.std(holdout_scores)) if len(holdout_scores) > 1 else float('nan')
-    return bundle, float(np.mean(holdout_scores)), std, np.mean(class_scores, axis=0)
+    return bundle, float(np.mean(holdout_scores)), std, np.mean(class_scores, axis=0), oof
 
 
-def _batch_images(paths: pd.Series, indices, normalize: str, augment: bool):
+def _batch_images(paths: pd.Series, indices, normalize: str, augment: bool, frame_index=None):
     import torch
     images = []
     for index in indices:
         flip = bool(augment and np.random.random() < 0.5)
-        images.append(M.load_image_tensor(paths.iloc[int(index)], normalize=normalize, flip=flip))
+        if frame_index is None:
+            images.append(M.load_image_tensor(paths.iloc[int(index)], normalize=normalize, flip=flip))
+        else:
+            shots = [
+                M.load_image_tensor(paths.iloc[int(frame_index[int(index), slot])], normalize=normalize, flip=flip)
+                for slot in range(frame_index.shape[1])
+            ]
+            images.append(torch.stack(shots))
     return torch.stack(images)
 
 
-def _run_epoch(network, optimizer, indices, paths, tabular, sequences, mask, y, config, batch_size, device, train_mode):
+def _run_epoch(network, optimizer, indices, paths, tabular, sequences, mask, y, config, batch_size, device, train_mode, frame_index=None):
     import torch
     from torch import nn
     network.train(train_mode)
-    if train_mode and network.freeze_backbone:
+    if train_mode and getattr(network, 'freeze_backbone', False) and getattr(network, 'backbone', None) is not None:
         network.backbone.eval()
     total_loss, seen = 0.0, 0
     order = np.array(indices)
     if train_mode:
         order = np.random.permutation(order)
     predictions = np.zeros(len(y), dtype=int)
-    scored = []
+    proba = np.zeros((len(y), 6), dtype=np.float32)
+    use_image = bool(config.get('use_image', True))
     for start in range(0, len(order), batch_size):
         batch = order[start:start + batch_size]
-        images = _batch_images(paths, batch, config['normalize'], augment=train_mode).to(device)
-        table = torch.from_numpy(tabular[batch]).to(device)
+        images = table = seq = mask_batch = None
+        if use_image:
+            images = _batch_images(paths, batch, config['normalize'], train_mode, frame_index).to(device)
+            table = torch.from_numpy(tabular[batch]).to(device)
         target = torch.from_numpy(y[batch].astype(np.int64)).to(device)
-        seq = mask_batch = None
         if sequences is not None:
             seq = torch.from_numpy(sequences[batch]).to(device)
             mask_batch = torch.from_numpy(mask[batch]).to(device)
@@ -187,9 +204,10 @@ def _run_epoch(network, optimizer, indices, paths, tabular, sequences, mask, y, 
             optimizer.step()
         total_loss += float(loss.item()) * len(batch)
         seen += len(batch)
-        predictions[batch] = M.logits_to_proba(logits.detach(), config['head']).argmax(dim=1).cpu().numpy() + 1
-        scored.extend(batch.tolist())
-    return total_loss / max(seen, 1), predictions
+        batch_proba = M.logits_to_proba(logits.detach(), config['head']).cpu().numpy()
+        proba[batch] = batch_proba
+        predictions[batch] = batch_proba.argmax(axis=1) + 1
+    return total_loss / max(seen, 1), predictions, proba
 
 
 def _train_one_torch(config, frame, paths, features, y, sequence_cols, train_idx, holdout_idx, args, seed):
@@ -200,13 +218,18 @@ def _train_one_torch(config, frame, paths, features, y, sequence_cols, train_idx
     config['normalize'] = normalize
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     network.to(device)
-    tabular_prep = M.TabularPrep().fit(features.iloc[train_idx])
-    tabular = tabular_prep.transform(features).astype(np.float32)
+    if config.get('use_image', True):
+        tabular_prep = M.TabularPrep().fit(features.iloc[train_idx])
+        tabular = tabular_prep.transform(features).astype(np.float32)
+    else:
+        tabular_prep = None
+        tabular = None
     sequences = mask = None
-    if config['use_gru']:
+    if config.get('sequence', 'none') != 'none':
         sequence_prep = M.TabularPrep().fit(M._sensor_matrix(frame.iloc[train_idx], sequence_cols))
         sensor = sequence_prep.transform(M._sensor_matrix(frame, sequence_cols)).astype(np.float32)
         sequences, mask = M.build_sequences(frame, sensor)
+    frame_index = M.causal_frame_rows(frame) if int(config.get('frames', 1)) > 1 else None
     head_lr = 1e-4 if args.unfreeze else 1e-3
     groups = [{'params': [p for n, p in network.named_parameters() if p.requires_grad and not n.startswith('backbone.')], 'lr': head_lr}]
     backbone_params = [p for n, p in network.named_parameters() if p.requires_grad and n.startswith('backbone.')]
@@ -216,22 +239,26 @@ def _train_one_torch(config, frame, paths, features, y, sequence_cols, train_idx
     y_np = y.to_numpy()
     best_score, best_epoch, wait, best_state = -1.0, 1, 0, None
     best_class = np.zeros(6)
+    best_proba = None
     for epoch in range(1, args.epochs + 1):
-        _run_epoch(network, optimizer, train_idx, paths, tabular, sequences, mask, y_np, config, args.batch_size, device, True)
-        _, prediction = _run_epoch(network, optimizer, holdout_idx, paths, tabular, sequences, mask, y_np, config, args.batch_size, device, False)
+        _run_epoch(network, optimizer, train_idx, paths, tabular, sequences, mask, y_np, config, args.batch_size, device, True, frame_index)
+        _, prediction, proba = _run_epoch(
+            network, optimizer, holdout_idx, paths, tabular, sequences, mask, y_np, config, args.batch_size, device, False, frame_index,
+        )
         holdout_pred = prediction[np.asarray(holdout_idx)]
         score = macro_f1(y.iloc[holdout_idx], holdout_pred)
         if score > best_score:
             best_score, best_epoch, wait = score, epoch, 0
             best_class = per_class_f1(y.iloc[holdout_idx], holdout_pred)
             best_state = {key: value.detach().cpu().clone() for key, value in network.state_dict().items()}
+            best_proba = proba[np.asarray(holdout_idx)].copy()
         else:
             wait += 1
             if wait >= 2:
                 break
     if best_state is not None:
         network.load_state_dict(best_state)
-    return best_epoch, best_score, best_class
+    return best_epoch, best_score, best_class, best_proba
 
 
 def _train_final_torch(config, frame, paths, features, y, sequence_cols, epochs, args, seed):
@@ -242,14 +269,19 @@ def _train_final_torch(config, frame, paths, features, y, sequence_cols, epochs,
     config['normalize'] = normalize
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     network.to(device)
-    tabular_prep = M.TabularPrep().fit(features)
-    tabular = tabular_prep.transform(features).astype(np.float32)
+    if config.get('use_image', True):
+        tabular_prep = M.TabularPrep().fit(features)
+        tabular = tabular_prep.transform(features).astype(np.float32)
+    else:
+        tabular_prep = None
+        tabular = None
     sequence_prep = None
     sequences = mask = None
-    if config['use_gru']:
+    if config.get('sequence', 'none') != 'none':
         sequence_prep = M.TabularPrep().fit(M._sensor_matrix(frame, sequence_cols))
         sensor = sequence_prep.transform(M._sensor_matrix(frame, sequence_cols)).astype(np.float32)
         sequences, mask = M.build_sequences(frame, sensor)
+    frame_index = M.causal_frame_rows(frame) if int(config.get('frames', 1)) > 1 else None
     head_lr = 1e-4 if args.unfreeze else 1e-3
     groups = [{'params': [p for n, p in network.named_parameters() if p.requires_grad and not n.startswith('backbone.')], 'lr': head_lr}]
     backbone_params = [p for n, p in network.named_parameters() if p.requires_grad and n.startswith('backbone.')]
@@ -258,7 +290,7 @@ def _train_final_torch(config, frame, paths, features, y, sequence_cols, epochs,
     optimizer = torch.optim.AdamW(groups, weight_decay=1e-4)
     indices = np.arange(len(frame))
     for _ in range(epochs):
-        _run_epoch(network, optimizer, indices, paths, tabular, sequences, mask, y.to_numpy(), config, args.batch_size, device, True)
+        _run_epoch(network, optimizer, indices, paths, tabular, sequences, mask, y.to_numpy(), config, args.batch_size, device, True, frame_index)
     network.eval()
     return network, tabular_prep, sequence_prep
 
@@ -278,10 +310,10 @@ def format_row(name, cv_mean, cv_std, class_f1, val_f1) -> str:
 
 
 def train_tabular(name, features, y, groups, class_weight, seed, folds):
-    cv_mean, cv_std, class_f1 = cross_validate(name, features, y, groups, class_weight, seed, folds)
+    cv_mean, cv_std, class_f1, oof = cross_validate(name, features, y, groups, class_weight, seed, folds)
     estimator = M.make_tabular(name, class_weight, seed)
     estimator.fit(features, y)
-    return tabular_bundle(name, estimator, features, seed), cv_mean, cv_std, class_f1
+    return tabular_bundle(name, estimator, features, seed), cv_mean, cv_std, class_f1, oof
 
 
 def main():
@@ -298,39 +330,74 @@ def main():
     parser.add_argument('--head', choices=['ce', 'coral'], default='ce')
     parser.add_argument('--unfreeze', action='store_true', help='사전학습 합성곱망의 마지막이 아닌 전체 가중치를 학습')
     parser.add_argument('--seed', type=int, default=M.SEED)
+    parser.add_argument('--oof_only', action='store_true', help='표 모델의 Train 교차검증 확률만 저장하고 기존 가중치는 덮어쓰지 않음')
     args = parser.parse_args()
     class_weight = None if args.class_weight == 'none' else 'balanced'
+    if args.oof_only and (args.compare is not None or args.model in M.DEEP_MODELS):
+        raise SystemExit('--oof_only 는 표 모델 하나에만 씁니다. 예: --model lightgbm --oof_only')
     M.set_seed(args.seed)
 
     train = read_split(args.data_dir, 'train')
     validation = read_split(args.data_dir, 'validation')
     assert set(train.experiment_id).isdisjoint(set(validation.experiment_id))
     print(f'Train {len(train):,}행 / {train.experiment_id.nunique()}실험, Validation {len(validation):,}행 / {validation.experiment_id.nunique()}실험')
-    _, features = prepare(train, args.data_dir, 'train')
+    image_free = args.model in M.DEEP_MODELS and not M.deep_config(args.model)['image'] and args.compare is None
+    if image_free:
+        features = pd.DataFrame(np.zeros((len(train), 1)), columns=['unused'])
+        print('피처 수: 0. 과거 300초 센서 시퀀스만 사용합니다.')
+    else:
+        _, features = prepare(train, args.data_dir, 'train')
+        print(f'피처 수: {features.shape[1]}')
     y = labels_of(train)
     groups = train.experiment_id.astype(str)
-    print(f'피처 수: {features.shape[1]}')
 
-    names = M.TABULAR_MODELS if args.compare == 'tabular' else M.DEEP_MODELS if args.compare == 'deep' else [args.model]
+    names = M.TABULAR_MODELS if args.compare == 'tabular' else M.COMPARE_DEEP_MODELS if args.compare == 'deep' else [args.model]
     print(f"{'model':<20} {'cv_f1':>6} {'cv_std':>6} {'f1_4':>6} {'f1_5':>6} {'val_f1':>6}")
     rows = []
     weight_dir = args.model_out.parent
     for name in names:
         try:
-            train_paths = M.resolve_image_paths(train, [args.data_dir / 'train', args.data_dir])
+            train_paths = None
+            if name in M.DEEP_MODELS and M.deep_config(name)['image']:
+                train_paths = M.resolve_image_paths(train, [args.data_dir / 'train', args.data_dir])
             if name in M.DEEP_MODELS:
-                bundle, cv_mean, cv_std, class_f1 = fit_torch(name, train, train_paths, features, y, groups, args, args.seed)
+                bundle, cv_mean, cv_std, class_f1, oof = fit_torch(name, train, train_paths, features, y, groups, args, args.seed)
             else:
                 folds = args.folds if args.folds is not None else 5
-                bundle, cv_mean, cv_std, class_f1 = train_tabular(name, features, y, groups, class_weight, args.seed, folds)
-            candidate = weight_dir / f'{name}.joblib'
+                if args.oof_only:
+                    cv_mean, cv_std, class_f1, oof = cross_validate(name, features, y, groups, class_weight, args.seed, folds)
+                    oof_path = weight_dir / f'{name}_oof.npz'
+                    np.savez_compressed(
+                        oof_path, proba=oof, sample_id=train['sample_id'].astype(str).to_numpy(),
+                        label=y.to_numpy(), experiment_id=train['experiment_id'].astype(str).to_numpy(),
+                    )
+                    print('홀드아웃 확률:', oof_path)
+                    print(format_row(name, cv_mean, cv_std, class_f1, float('nan')))
+                    continue
+                bundle, cv_mean, cv_std, class_f1, oof = train_tabular(name, features, y, groups, class_weight, args.seed, folds)
+            stem = name
+            if name in M.DEEP_MODELS and args.head == 'coral':
+                stem += '_coral'
+            if args.seed != M.SEED:
+                stem += f'_seed{args.seed}'
+            candidate = weight_dir / f'{stem}.joblib'
             save_bundle(candidate, bundle)
+            if oof is not None:
+                oof_path = candidate.with_name(f'{stem}_oof.npz')
+                np.savez_compressed(
+                    oof_path, proba=oof, sample_id=train['sample_id'].astype(str).to_numpy(),
+                    label=y.to_numpy(), experiment_id=train['experiment_id'].astype(str).to_numpy(),
+                )
+                print('홀드아웃 확률:', oof_path)
             val_f1, _ = score_validation(bundle, validation, args.data_dir)
             print(format_row(name, cv_mean, cv_std, class_f1, val_f1))
             rows.append({'name': name, 'cv': cv_mean, 'path': candidate, 'bundle': bundle, 'val': val_f1})
         except Exception as error:
             print(f'{name:<20} 건너뜀: {type(error).__name__}: {error}')
             traceback.print_exc()
+    if args.oof_only:
+        print('기존 가중치는 그대로 두었습니다. 추론은 시작하지 않았습니다.')
+        return
     if not rows:
         raise SystemExit('저장된 모델이 없습니다. 위 오류를 확인하십시오.')
     best = max(rows, key=lambda row: row['cv'])

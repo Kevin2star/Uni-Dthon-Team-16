@@ -1,0 +1,7 @@
+~/data
+data/
+work/
+__pycache__/
+*.pyc
+*.log
+catboost_info/

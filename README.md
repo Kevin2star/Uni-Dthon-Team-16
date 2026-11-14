@@ -39,14 +39,38 @@ python -u train.py --data_dir $D --compare tabular --model_out weights/model.job
 
 시작한 뒤 `Ctrl+B`를 누르고 `D`를 누르면 세션에서 빠지면서 학습은 계속됩니다. 다시 들어갈 때는 `tmux attach -t train-<내이름>`.
 
-딥러닝 후보는 표 모델 비교 뒤에 각각 다른 파일로 저장합니다. 공용 서버에서는 한 번에 하나만 실행합니다. 이미지 피처와 torch 스레드는 기본 2개입니다. gru_efficientnet은 이 목록에 없습니다.
+딥러닝 후보는 한 번에 하나만 실행합니다. 이미지 피처와 torch 스레드는 기본 2개입니다. `gru_efficientnet`은 실행 목록에 없습니다. 이미 끝난 EfficientNet, ResNet18, MobileNet, smallcnn 다음에 아래 순서로 진행합니다. 각 명령이 끝난 뒤 로그의 교차검증 Macro F1, 4단계 F1, 5단계 F1을 LightGBM(0.8913, 0.8835, 0.8811)과 비교합니다.
 
 ```bash
-python -u train.py --data_dir $D --model efficientnet --model_out weights/efficientnet.joblib 2>&1 | tee train_efficientnet.log
-python -u train.py --data_dir $D --model smallcnn --model_out weights/smallcnn.joblib 2>&1 | tee train_smallcnn.log
-python -u train.py --data_dir $D --model mobilenet --model_out weights/mobilenet.joblib 2>&1 | tee train_mobilenet.log
-python -u train.py --data_dir $D --model resnet18 --model_out weights/resnet18.joblib 2>&1 | tee train_resnet.log
+python -u train.py --data_dir $D --model swin_t --head coral --model_out weights/swin_t_coral.joblib 2>&1 | tee train_swin_coral.log
+python -u train.py --data_dir $D --model swin_t --model_out weights/swin_t.joblib 2>&1 | tee train_swin.log
+python -u train.py --data_dir $D --model convnext_tiny --model_out weights/convnext_tiny.joblib 2>&1 | tee train_convnext.log
+python -u train.py --data_dir $D --model resnet18_gapgmp --model_out weights/resnet18_gapgmp.joblib 2>&1 | tee train_resnet_gapgmp.log
+python -u train.py --data_dir $D --model cnn1d --model_out weights/cnn1d.joblib 2>&1 | tee train_cnn1d.log
 ```
+
+단일 프레임 Swin의 4단계와 5단계가 모두 LightGBM보다 낮으면 세 시점 모델과 나머지 이미지 모델을 이어서 하나씩 실행합니다.
+
+```bash
+python -u train.py --data_dir $D --model swin_t_time --model_out weights/swin_t_time.joblib 2>&1 | tee train_swin_time.log
+python -u train.py --data_dir $D --model deit_small --model_out weights/deit_small.joblib 2>&1 | tee train_deit.log
+python -u train.py --data_dir $D --model dinov2_vits14 --model_out weights/dinov2_vits14.joblib 2>&1 | tee train_dinov2.log
+python -u train.py --data_dir $D --model maxvit_tiny --model_out weights/maxvit_tiny.joblib 2>&1 | tee train_maxvit.log
+python -u train.py --data_dir $D --model mobilevit_s --model_out weights/mobilevit_s.joblib 2>&1 | tee train_mobilevit.log
+```
+
+한 모델의 교차검증이 LightGBM을 넘으면 시드 43, 44를 같은 방식으로 학습한 뒤 `blend.py`로 세 확률을 평균합니다. 조합은 저장된 가중치의 확률만 사용합니다.
+
+```bash
+python blend.py --models weights/efficientnet.joblib weights/resnet18.joblib --input $D/test/test.csv --image_root $D/test --output weights/submission_eff_resnet.csv --model_out weights/eff_resnet.joblib
+python blend.py --models weights/lightgbm.joblib weights/xgboost.joblib weights/catboost.joblib weights/extratrees.joblib weights/histgb.joblib weights/cumulative.joblib --input $D/test/test.csv --image_root $D/test --output weights/submission_ensemble.csv --model_out weights/ensemble.joblib
+python train.py --data_dir $D --model lightgbm --oof_only --model_out weights/lightgbm.joblib
+python blend.py --fit-weights --models weights/swin_t.joblib weights/lightgbm.joblib --input $D/test/test.csv --image_root $D/test --output weights/submission_swin_lgb.csv --model_out weights/swin_lgb.joblib
+python blend.py --models weights/swin_t.joblib weights/swin_t_coral.joblib --input $D/test/test.csv --image_root $D/test --output weights/submission_swin_coral.csv --model_out weights/swin_coral.joblib
+python blend.py --stack --models weights/swin_t.joblib weights/lightgbm.joblib --input $D/test/test.csv --image_root $D/test --output weights/submission_stack.csv --model_out weights/stack.joblib
+```
+
+`--fit-weights`와 `--stack`은 `*_oof.npz`가 있을 때만 비중을 정합니다. 없는 파일은 Test 점수로 대체하지 않고 멈춥니다. `--oof_only`는 기존 `lightgbm.joblib`을 덮어쓰지 않습니다. `--stack`은 홀드아웃 실험 단위 교차검증이 확률 평균보다 높을 때만 제출 파일을 만듭니다.
 
 GPU를 쓰는 동안 다른 터미널에서 `watch -n 2 nvidia-smi`로 확인합니다. 끝낼 때는 `Ctrl+C`입니다.
 
@@ -79,8 +103,12 @@ python test.py --input $D/test/test.csv --image_root $D/test --output submission
 | cumulative | 1~6단계 순서에 대한 누적 이항 5개 |
 | ensemble | 위 표 모델의 클래스 확률 평균 |
 | efficientnet, resnet18, mobilenet, smallcnn | 현재 열화상과 센서 피처를 함께 분류 |
-| gru_efficientnet | 위 결합에 과거 300초 센서 GRU를 추가 |
+| resnet18_gapgmp | ResNet18의 평균 풀링과 최대 풀링을 이어 붙임 |
+| convnext_tiny, swin_t, deit_small, dinov2_vits14, maxvit_tiny, mobilevit_s | 현재 열화상과 센서 피처 |
+| swin_t_time | 현재, 30초 전, 120초 전 열화상을 각각 임베딩 |
+| cnn1d | 과거 300초 센서만 사용. 이미지는 읽지 않음 |
 | `--head coral` | 딥러닝 출력을 “k보다 큰가” 5개로 바꿈 |
+| blend.py | 저장된 모델의 확률 평균, 홀드아웃 비중, 스택 |
 
 최종 제출 모델은 열화상과 센서를 둘 다 사용합니다. 이미지 통계와 열화상 입력이 피처에 들어 있습니다.
 
@@ -90,6 +118,12 @@ python test.py --input $D/test/test.csv --image_root $D/test --output submission
 - efficientnet_b0: torchvision, ImageNet-1K V1, BSD-3-Clause
 - resnet18: torchvision, ImageNet-1K V1, BSD-3-Clause
 - mobilenet_v3_small: torchvision, ImageNet-1K V1, BSD-3-Clause
-- smallcnn: 사전학습 가중치 없음
+- convnext_tiny: torchvision, ImageNet-1K V1, BSD-3-Clause
+- swin_t: torchvision, ImageNet-1K V1, BSD-3-Clause
+- deit_small_patch16_224.fb_in1k: timm, ImageNet-1K, Apache-2.0
+- vit_small_patch14_dinov2.lvd142m: timm, LVD-142M, Apache-2.0. 입력 크기는 224
+- maxvit_tiny_tf_224.in1k: timm, ImageNet-1K, Apache-2.0
+- mobilevit_s.cvnets_in1k: timm, ImageNet-1K, Apache-2.0
+- smallcnn, cnn1d: 사전학습 가중치 없음
 
 100MB를 넘는 가중치 링크: <드라이브 링크>

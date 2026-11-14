@@ -36,7 +36,13 @@ EXCLUDED_COLUMNS = {'indu_t.1'}
 ID_COLUMNS = {'sample_id', 'experiment_id', 'image_path', 'label', 'relative_time_s'}
 
 TABULAR_MODELS = ['lightgbm', 'xgboost', 'catboost', 'extratrees', 'histgb', 'cumulative']
-DEEP_MODELS = ['efficientnet', 'resnet18', 'mobilenet', 'smallcnn', 'gru_efficientnet']
+# gru_efficientnet은 저장된 가중치를 읽을 수 있게만 남겨 둡니다. 새 실험 목록에는 없습니다.
+DEEP_MODELS = [
+    'efficientnet', 'resnet18', 'resnet18_gapgmp', 'mobilenet', 'smallcnn',
+    'cnn1d', 'convnext_tiny', 'swin_t', 'swin_t_time',
+    'deit_small', 'dinov2_vits14', 'maxvit_tiny', 'mobilevit_s', 'gru_efficientnet',
+]
+COMPARE_DEEP_MODELS = ['efficientnet', 'resnet18', 'mobilenet', 'smallcnn']
 COMBINATION_MODELS = ['ensemble']
 ALL_MODELS = TABULAR_MODELS + DEEP_MODELS + COMBINATION_MODELS
 
@@ -166,15 +172,37 @@ def load_image_tensor(path, size: int = IMAGE_SIZE, normalize: str = 'imagenet',
     if flip:
         tensor = torch.flip(tensor, dims=[2])
     if normalize == 'imagenet':
-        mean = torch.tensor([0.485, 0.456, 0.406], dtype=tensor.dtype)[:, None, None]
-        std = torch.tensor([0.229, 0.224, 0.225], dtype=tensor.dtype)[:, None, None]
-        tensor = (tensor - mean) / std
+        mean, std = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
+    elif isinstance(normalize, dict):
+        mean, std = normalize['mean'], normalize['std']
+    else:
+        mean = std = None
+    if mean is not None:
+        mean_t = torch.tensor(mean, dtype=tensor.dtype)[:, None, None]
+        std_t = torch.tensor(std, dtype=tensor.dtype)[:, None, None]
+        tensor = (tensor - mean_t) / std_t
     return tensor
 
 
 # ---------------------------------------------------------------------------
 # 과거 방향 시계열. 시각을 정렬한 뒤 (t-window, t] 구간만 사용합니다.
 # ---------------------------------------------------------------------------
+def causal_frame_rows(frame: pd.DataFrame, offsets: tuple[float, ...] = (0.0, 30.0, 120.0)) -> np.ndarray:
+    """현재, 30초 전, 120초 전 행 번호. 각 행의 시각보다 이후는 고르지 않습니다."""
+    frame = frame.reset_index(drop=True)
+    out = np.zeros((len(frame), len(offsets)), dtype=np.int64)
+    times_all = pd.to_numeric(frame['relative_time_s'], errors='coerce').to_numpy(dtype=float)
+    for _, positions in frame.groupby('experiment_id', sort=False).indices.items():
+        positions = _sorted_positions(frame, np.asarray(positions))
+        times = times_all[positions]
+        for row in positions:
+            now = times_all[row]
+            for k, offset in enumerate(offsets):
+                pos = int(np.searchsorted(times, now - offset, side='right') - 1)
+                out[row, k] = int(positions[pos]) if pos >= 0 else int(row)
+    return out
+
+
 def _sorted_positions(frame: pd.DataFrame, positions: np.ndarray) -> np.ndarray:
     times = frame['relative_time_s'].to_numpy(dtype=float)[positions]
     sample_ids = frame['sample_id'].astype(str).to_numpy()[positions]
@@ -538,14 +566,32 @@ def make_tabular(name: str, class_weight=None, seed: int = SEED):
 
 
 # ---------------------------------------------------------------------------
-# 딥러닝. 현재 열화상과 센서 피처를 함께 쓰고, GRU는 과거 센서만 봅니다.
+# 딥러닝. 현재 열화상과 센서 피처를 함께 쓰고, 시퀀스 모델은 과거 센서만 봅니다.
 # ---------------------------------------------------------------------------
-def deep_spec(name: str) -> tuple[str, bool]:
+DEEP_TIMM = {
+    'deit_small': 'deit_small_patch16_224.fb_in1k',
+    'dinov2_vits14': 'vit_small_patch14_dinov2.lvd142m',
+    'maxvit_tiny': 'maxvit_tiny_tf_224.in1k',
+    'mobilevit_s': 'mobilevit_s.cvnets_in1k',
+}
+
+
+def deep_config(name: str) -> dict:
+    """백본, 센서 시퀀스, 이미지 사용, 시점 수를 반환합니다. GRU는 새 실험에서 쓰지 않습니다."""
     if name == 'gru_efficientnet':
-        return 'efficientnet', True
-    if name in {'efficientnet', 'resnet18', 'mobilenet', 'smallcnn'}:
-        return name, False
+        return {'backbone': 'efficientnet', 'sequence': 'gru', 'image': True, 'frames': 1}
+    if name == 'cnn1d':
+        return {'backbone': None, 'sequence': 'cnn1d', 'image': False, 'frames': 1}
+    if name == 'swin_t_time':
+        return {'backbone': 'swin_t', 'sequence': 'none', 'image': True, 'frames': 3}
+    if name in {'efficientnet', 'resnet18', 'resnet18_gapgmp', 'mobilenet', 'smallcnn', 'convnext_tiny', 'swin_t'} or name in DEEP_TIMM:
+        return {'backbone': name, 'sequence': 'none', 'image': True, 'frames': 1}
     raise ValueError(f'딥러닝 모델이 아닙니다: {name}')
+
+
+def deep_spec(name: str) -> tuple[str, bool]:
+    spec = deep_config(name)
+    return spec['backbone'] or name, spec['sequence'] == 'gru'
 
 
 def _import_torch():
@@ -577,6 +623,13 @@ class SmallThermalCNN(object):
         return _Net()
 
 
+def _timm_normalize(net) -> dict:
+    cfg = getattr(net, 'pretrained_cfg', {}) or {}
+    mean = tuple(cfg.get('mean', (0.485, 0.456, 0.406)))
+    std = tuple(cfg.get('std', (0.229, 0.224, 0.225)))
+    return {'mean': mean, 'std': std}
+
+
 def build_backbone(name: str, pretrained: bool):
     torch, nn = _import_torch()
     if name == 'smallcnn':
@@ -588,13 +641,28 @@ def build_backbone(name: str, pretrained: bool):
         dim = net.classifier[1].in_features
         net.classifier = nn.Identity()
         return net, dim, 'imagenet'
-    if name == 'resnet18':
+    if name in {'resnet18', 'resnet18_gapgmp'}:
         from torchvision.models import ResNet18_Weights, resnet18
         weights = ResNet18_Weights.IMAGENET1K_V1 if pretrained else None
         net = resnet18(weights=weights)
-        dim = net.fc.in_features
-        net.fc = nn.Identity()
-        return net, dim, 'imagenet'
+        if name == 'resnet18':
+            dim = net.fc.in_features
+            net.fc = nn.Identity()
+            return net, dim, 'imagenet'
+
+        class _GapGmp(nn.Module):
+            def __init__(self, resnet):
+                super().__init__()
+                self.conv1, self.bn1, self.relu, self.maxpool = resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool
+                self.layer1, self.layer2, self.layer3, self.layer4 = resnet.layer1, resnet.layer2, resnet.layer3, resnet.layer4
+                self.avg, self.mx = nn.AdaptiveAvgPool2d(1), nn.AdaptiveMaxPool2d(1)
+
+            def forward(self, x):
+                x = self.maxpool(self.relu(self.bn1(self.conv1(x))))
+                x = self.layer4(self.layer3(self.layer2(self.layer1(x))))
+                return torch.cat([self.avg(x).flatten(1), self.mx(x).flatten(1)], dim=1)
+
+        return _GapGmp(net), 1024, 'imagenet'
     if name == 'mobilenet':
         from torchvision.models import MobileNet_V3_Small_Weights, mobilenet_v3_small
         weights = MobileNet_V3_Small_Weights.IMAGENET1K_V1 if pretrained else None
@@ -602,42 +670,93 @@ def build_backbone(name: str, pretrained: bool):
         dim = net.classifier[0].in_features
         net.classifier = nn.Identity()
         return net, dim, 'imagenet'
+    if name == 'convnext_tiny':
+        from torchvision.models import ConvNeXt_Tiny_Weights, convnext_tiny
+        weights = ConvNeXt_Tiny_Weights.IMAGENET1K_V1 if pretrained else None
+        net = convnext_tiny(weights=weights)
+        dim = net.classifier[2].in_features
+        net.classifier[2] = nn.Identity()
+        return net, dim, 'imagenet'
+    if name == 'swin_t':
+        from torchvision.models import Swin_T_Weights, swin_t
+        weights = Swin_T_Weights.IMAGENET1K_V1 if pretrained else None
+        net = swin_t(weights=weights)
+        dim = net.head.in_features
+        net.head = nn.Identity()
+        return net, dim, 'imagenet'
+    if name in DEEP_TIMM:
+        import timm
+        net = timm.create_model(DEEP_TIMM[name], pretrained=pretrained, num_classes=0, img_size=IMAGE_SIZE)
+        return net, int(net.num_features), _timm_normalize(net)
     raise ValueError(name)
 
 
 class FusionNet(object):
-    def __new__(cls, backbone_name: str, image_dim: int, tabular_dim: int, sensor_dim: int, use_gru: bool, head: str, backbone):
+    def __new__(cls, image_dim: int, tabular_dim: int, sensor_dim: int, sequence: str, frames: int, head: str, backbone):
         torch, nn = _import_torch()
 
         class _Fusion(nn.Module):
             def __init__(self):
                 super().__init__()
                 self.backbone = backbone
-                self.use_gru = use_gru
+                self.sequence = sequence
+                self.frames = frames
+                self.use_image = backbone is not None
+                self.tabular_dim = tabular_dim
+                self.use_gru = sequence == 'gru'
                 self.head_kind = head
                 self.freeze_backbone = False
-                self.img_proj = nn.Linear(image_dim, 128)
-                self.tabular = nn.Sequential(nn.Linear(tabular_dim, 128), nn.ReLU(), nn.Dropout(0.2))
-                fused = 256
-                if use_gru:
+                fused = 0
+                if self.use_image:
+                    self.img_proj = nn.Linear(image_dim, 128)
+                    fused += 128
+                    if frames > 1:
+                        layer = nn.TransformerEncoderLayer(
+                            d_model=128, nhead=4, dim_feedforward=256, batch_first=True, dropout=0.1,
+                        )
+                        self.time_encoder = nn.TransformerEncoder(layer, num_layers=1)
+                if tabular_dim:
+                    self.tabular = nn.Sequential(nn.Linear(tabular_dim, 128), nn.ReLU(), nn.Dropout(0.2))
+                    fused += 128
+                if sequence == 'gru':
                     self.gru = nn.GRU(sensor_dim, 128, batch_first=True)
+                    fused += 128
+                if sequence == 'cnn1d':
+                    self.conv1d = nn.Sequential(
+                        nn.Conv1d(sensor_dim, 64, 3, padding=1), nn.ReLU(),
+                        nn.Conv1d(64, 128, 3, padding=1), nn.ReLU(),
+                    )
                     fused += 128
                 self.classifier = nn.Linear(fused, 5 if head == 'coral' else 6)
 
             def train(self, mode: bool = True):
                 super().train(mode)
-                if self.freeze_backbone:
+                if self.freeze_backbone and self.backbone is not None:
                     self.backbone.eval()
                 return self
 
+            def _encode(self, image):
+                return self.img_proj(self.backbone(image))
+
             def forward(self, image, tabular, seq=None, mask=None):
-                image_vector = self.img_proj(self.backbone(image))
-                parts = [image_vector, self.tabular(tabular)]
-                if self.use_gru:
+                parts = []
+                if self.use_image:
+                    if self.frames == 1:
+                        parts.append(self._encode(image))
+                    else:
+                        tokens = torch.stack([self._encode(image[:, t]) for t in range(image.size(1))], dim=1)
+                        parts.append(self.time_encoder(tokens).mean(dim=1))
+                if self.tabular_dim:
+                    parts.append(self.tabular(tabular))
+                if self.sequence == 'gru':
                     lengths = mask.sum(dim=1).clamp(min=1).cpu()
                     packed = nn.utils.rnn.pack_padded_sequence(seq, lengths, batch_first=True, enforce_sorted=False)
                     _, hidden = self.gru(packed)
                     parts.append(hidden[-1])
+                if self.sequence == 'cnn1d':
+                    hidden = self.conv1d((seq * mask.unsqueeze(-1)).transpose(1, 2))
+                    weight = mask.unsqueeze(1)
+                    parts.append((hidden * weight).sum(dim=2) / weight.sum(dim=2).clamp(min=1))
                 return self.classifier(torch.cat(parts, dim=1))
 
         return _Fusion()
@@ -655,13 +774,20 @@ def logits_to_proba(logits, head: str):
 
 
 def build_fusion(config: dict, pretrained: bool):
-    backbone_name, _ = deep_spec(config['model_name'])
-    backbone, image_dim, normalize = build_backbone(backbone_name, pretrained=pretrained)
+    spec = deep_config(config['model_name'])
+    backbone_name = config.get('backbone', spec['backbone'])
+    sequence = config.get('sequence', spec['sequence'])
+    frames = int(config.get('frames', spec['frames']))
+    if backbone_name is None:
+        backbone, image_dim, normalize = None, 0, 'none'
+    else:
+        backbone, image_dim, normalize = build_backbone(backbone_name, pretrained=pretrained)
     network = FusionNet(
-        backbone_name, image_dim, config['tabular_dim'], config['sensor_dim'],
-        config['use_gru'], config['head'], backbone,
+        image_dim, int(config['tabular_dim']), int(config['sensor_dim']),
+        sequence, frames, config['head'], backbone,
     )
-    network.freeze_backbone = config.get('freeze_backbone', True) and backbone_name != 'smallcnn'
+    default_freeze = backbone_name not in (None, 'smallcnn')
+    network.freeze_backbone = config.get('freeze_backbone', default_freeze) and backbone is not None
     if network.freeze_backbone:
         for parameter in network.backbone.parameters():
             parameter.requires_grad = False
@@ -671,23 +797,70 @@ def build_fusion(config: dict, pretrained: bool):
 PRETRAINED_MODELS = {
     'efficientnet': 'torchvision efficientnet_b0, ImageNet-1K V1, BSD-3-Clause',
     'resnet18': 'torchvision resnet18, ImageNet-1K V1, BSD-3-Clause',
+    'resnet18_gapgmp': 'torchvision resnet18, ImageNet-1K V1, BSD-3-Clause. 평균 풀링과 최대 풀링을 이어 붙임',
     'mobilenet': 'torchvision mobilenet_v3_small, ImageNet-1K V1, BSD-3-Clause',
+    'convnext_tiny': 'torchvision convnext_tiny, ImageNet-1K V1, BSD-3-Clause',
+    'swin_t': 'torchvision swin_t, ImageNet-1K V1, BSD-3-Clause',
+    'swin_t_time': 'torchvision swin_t, ImageNet-1K V1, BSD-3-Clause. 현재·30초 전·120초 전 세 시점',
+    'deit_small': 'timm deit_small_patch16_224.fb_in1k, ImageNet-1K, Apache-2.0',
+    'dinov2_vits14': 'timm vit_small_patch14_dinov2.lvd142m, LVD-142M, Apache-2.0. 입력 224',
+    'maxvit_tiny': 'timm maxvit_tiny_tf_224.in1k, ImageNet-1K, Apache-2.0',
+    'mobilevit_s': 'timm mobilevit_s.cvnets_in1k, ImageNet-1K, Apache-2.0',
     'gru_efficientnet': 'torchvision efficientnet_b0, ImageNet-1K V1, BSD-3-Clause + 과거 센서 GRU',
+    'cnn1d': '사전학습 가중치 없음. 과거 300초 센서만 사용',
     'smallcnn': '사전학습 가중치 없음',
 }
+
+
+def _needs_image(bundle: dict) -> bool:
+    if bundle.get('kind') == 'blend':
+        return any(_needs_image(child) for child in bundle['bundles'])
+    if bundle.get('kind') == 'tabular':
+        return True
+    return bool(bundle.get('config', {}).get('use_image', True))
+
+
+def prepare_frame(frame: pd.DataFrame, roots: list[Path]):
+    """입력 행만으로 경로와 피처를 만듭니다. 조합에서 이미지를 한 번만 읽습니다."""
+    frame = frame.reset_index(drop=True)
+    paths = resolve_image_paths(frame, roots)
+    features = build_features(frame, extract_image_features(frame, paths))
+    return frame, paths, features
+
+
+def predict_proba(bundle: dict, frame: pd.DataFrame, roots: list[Path], prepared=None, batch_size: int = 32) -> np.ndarray:
+    """행 순서를 유지한 채 클래스 1~6 확률을 반환합니다. 학습은 하지 않습니다."""
+    if bundle.get('kind') == 'blend':
+        if prepared is None and _needs_image(bundle):
+            prepared = prepare_frame(frame, roots)
+        elif prepared is None:
+            prepared = (frame.reset_index(drop=True), None, None)
+        parts = [predict_proba(child, prepared[0], roots, prepared=prepared, batch_size=batch_size) for child in bundle['bundles']]
+        stacked = np.stack(parts, axis=0)
+        if bundle.get('stack') is not None:
+            aligned = _align_proba(bundle['stack'].predict_proba(np.concatenate(parts, axis=1)), bundle['stack'].classes_)
+            return aligned
+        weights = np.asarray(bundle['weights'], dtype=np.float64)
+        weights = weights / weights.sum()
+        return np.tensordot(weights, stacked, axes=(0, 0))
+    if prepared is None:
+        if _needs_image(bundle):
+            frame, paths, features = prepare_frame(frame, roots)
+        else:
+            frame, paths, features = frame.reset_index(drop=True), None, None
+    else:
+        frame, paths, features = prepared
+    if bundle['kind'] == 'tabular':
+        return bundle['estimator'].predict_proba(features.reindex(columns=bundle['features']))
+    return _predict_torch(bundle, frame, paths, features, batch_size)
 
 
 def predict_labels(bundle: dict, frame: pd.DataFrame, roots: list[Path], batch_size: int = 32) -> pd.Series:
     """입력 프레임의 행만으로 1~6 라벨을 예측합니다. 학습은 하지 않습니다."""
     frame = frame.reset_index(drop=True)
-    paths = resolve_image_paths(frame, roots)
-    image_features = extract_image_features(frame, paths)
-    features = build_features(frame, image_features).reindex(columns=bundle['features'])
-    if bundle['kind'] == 'tabular':
-        prediction = bundle['estimator'].predict(features)
-    else:
-        prediction = _predict_torch(bundle, frame, paths, features, batch_size)
-    return pd.Series(np.asarray(prediction).astype(int), index=frame['sample_id'].astype(str).to_numpy())
+    proba = predict_proba(bundle, frame, roots, batch_size=batch_size)
+    labels = (np.argmax(proba, axis=1) + 1).astype(int)
+    return pd.Series(labels, index=frame['sample_id'].astype(str).to_numpy())
 
 
 def _sensor_matrix(frame: pd.DataFrame, columns: list[str]) -> np.ndarray:
@@ -695,32 +868,48 @@ def _sensor_matrix(frame: pd.DataFrame, columns: list[str]) -> np.ndarray:
     return numeric(present, columns).to_numpy(dtype=np.float64)
 
 
-def _predict_torch(bundle: dict, frame: pd.DataFrame, paths: pd.Series, features: pd.DataFrame, batch_size: int) -> np.ndarray:
+def _predict_torch(bundle: dict, frame: pd.DataFrame, paths, features, batch_size: int) -> np.ndarray:
     torch, _ = _import_torch()
     limit_torch_threads()
-    network, normalize = build_fusion(bundle['config'], pretrained=False)
+    config = bundle['config']
+    network, normalize = build_fusion(config, pretrained=False)
     network.load_state_dict(bundle['state_dict'])
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     network.to(device)
     network.eval()
-    tabular = bundle['tabular_prep'].transform(features).astype(np.float32)
+    use_image = bool(config.get('use_image', True))
+    frames = int(config.get('frames', 1))
+    sequence = config.get('sequence', 'gru' if config.get('use_gru') else 'none')
+    tabular = None
+    if use_image:
+        tabular = bundle['tabular_prep'].transform(features.reindex(columns=bundle['features'])).astype(np.float32)
     sequences = mask = None
-    if bundle['config']['use_gru']:
+    if sequence != 'none':
         sensor = bundle['sequence_prep'].transform(_sensor_matrix(frame, bundle['sequence_cols'])).astype(np.float32)
         sequences, mask = build_sequences(frame, sensor)
-    prediction = np.zeros(len(frame), dtype=int)
+    frame_index = causal_frame_rows(frame) if frames > 1 else None
+    proba_out = np.zeros((len(frame), len(LABELS)), dtype=np.float64)
     with torch.inference_mode():
         for start in range(0, len(frame), batch_size):
             stop = min(start + batch_size, len(frame))
-            images = torch.stack([
-                load_image_tensor(paths.iloc[i], normalize=normalize, flip=False) for i in range(start, stop)
-            ]).to(device)
-            table = torch.from_numpy(tabular[start:stop]).to(device)
-            seq = mask_batch = None
+            images = table = seq = mask_batch = None
+            if use_image:
+                if frames == 1:
+                    images = torch.stack([
+                        load_image_tensor(paths.iloc[i], normalize=normalize, flip=False) for i in range(start, stop)
+                    ]).to(device)
+                else:
+                    shots = []
+                    for row in range(start, stop):
+                        shots.append(torch.stack([
+                            load_image_tensor(paths.iloc[int(frame_index[row, slot])], normalize=normalize, flip=False)
+                            for slot in range(frames)
+                        ]))
+                    images = torch.stack(shots).to(device)
+                table = torch.from_numpy(tabular[start:stop]).to(device)
             if sequences is not None:
                 seq = torch.from_numpy(sequences[start:stop]).to(device)
                 mask_batch = torch.from_numpy(mask[start:stop]).to(device)
             logits = network(images, table, seq, mask_batch)
-            proba = logits_to_proba(logits, bundle['config']['head'])
-            prediction[start:stop] = proba.argmax(dim=1).cpu().numpy() + 1
-    return prediction
+            proba_out[start:stop] = logits_to_proba(logits, config['head']).cpu().numpy()
+    return proba_out
