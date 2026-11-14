@@ -1,0 +1,331 @@
+<title>열폭주 베이스라인 v7 결과</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: one reading column, summary first, then stage-level → experiment-level → image evidence. Stage colors run cool→hot like a thermal scale. */
+:root{
+  --bg:#f6f7f9; --surface:#ffffff; --fg:#1b1f27; --muted:#5d6675; --line:#dde1e8; --accent:#c2410c;
+  --s1:#3d7cc9; --s2:#1f9e8f; --s3:#c99a12; --s4:#e0731f; --s5:#cf3b2b; --s6:#7e3a99;
+  --good:#1f8a4c; --bad:#c2352a;
+  --font-body:"IBM Plex Sans KR",system-ui,-apple-system,"Apple SD Gothic Neo","Malgun Gothic",sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#12151b; --surface:#1a1e26; --fg:#e7eaf0; --muted:#9aa3b2; --line:#2c323d; --accent:#fb8a4c;
+  --s1:#5b9be6; --s2:#34c2b0; --s3:#e2b733; --s4:#f28c3a; --s5:#f05a48; --s6:#b26ad0;
+  --good:#47c07a; --bad:#f06a5d; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#12151b; --surface:#1a1e26; --fg:#e7eaf0; --muted:#9aa3b2; --line:#2c323d; --accent:#fb8a4c;
+  --s1:#5b9be6; --s2:#34c2b0; --s3:#e2b733; --s4:#f28c3a; --s5:#f05a48; --s6:#b26ad0;
+  --good:#47c07a; --bad:#f06a5d; color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font-family:var(--font-body);font-size:15px;line-height:1.6;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:40px 80px}
+main{max-width:1080px;margin:0 auto;display:flex;flex-direction:column;gap:56px}
+h1,h2,h3{text-wrap:balance;margin:0;line-height:1.3}
+h1{font-size:30px;font-weight:700}
+h2{font-size:21px;font-weight:700}
+h3{font-size:15px;font-weight:700}
+p{margin:0;max-width:68ch}
+.mono,.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
+.eyebrow{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:500}
+.muted{color:var(--muted)}
+section{display:flex;flex-direction:column;gap:18px}
+.sec-head{display:flex;flex-direction:column;gap:6px}
+header{display:flex;flex-direction:column;gap:14px}
+.thermo{height:6px;border-radius:3px;background:linear-gradient(90deg,var(--s1),var(--s2),var(--s3),var(--s4),var(--s5),var(--s6));max-width:360px}
+.meta{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:13px;color:var(--muted)}
+.tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.tile{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:4px}
+.tile .v{font-family:var(--font-mono);font-size:28px;font-weight:600;font-variant-numeric:tabular-nums}
+.tile .k{font-size:13px;color:var(--muted)}
+.tile.hl{border-color:var(--accent)}
+.tile.hl .v{color:var(--accent)}
+.findings{display:flex;flex-direction:column;gap:12px;margin:0;padding:0;list-style:none}
+.findings li{display:grid;grid-template-columns:28px 1fr;gap:10px;align-items:start}
+.findings .n{font-family:var(--font-mono);color:var(--accent);font-weight:600}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:18px;min-width:0}
+.two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}
+.scroll{overflow-x:auto}
+svg text{fill:var(--fg);font-family:var(--font-body)}
+svg .t-muted{fill:var(--muted)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:13px}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.sw{width:12px;height:12px;border-radius:3px;display:inline-block}
+.chip{display:inline-flex;align-items:center;gap:4px;font-family:var(--font-mono);font-size:12px;padding:1px 7px;border-radius:999px;color:#fff;font-weight:600}
+table{border-collapse:collapse;font-size:13px;width:100%}
+th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+th{color:var(--muted);font-weight:500}
+.exp-row{display:grid;grid-template-columns:120px 1fr 64px;gap:12px;align-items:center;padding:6px 0;border-bottom:1px solid var(--line)}
+.exp-row:last-child{border-bottom:none}
+.exp-id{font-family:var(--font-mono);font-size:12px;line-height:1.35}
+.exp-id small{display:block;color:var(--muted);font-family:var(--font-body)}
+.bars{display:flex;flex-direction:column;gap:2px;min-width:0}
+.bars canvas{width:100%;height:12px;display:block;border-radius:2px}
+.exp-f1{font-family:var(--font-mono);font-size:13px;text-align:right;font-weight:600}
+.exp-row.flag{background:color-mix(in srgb,var(--bad) 8%,transparent);border-radius:6px;padding-inline:6px}
+.gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:10px}
+.card{display:flex;flex-direction:column;gap:4px;font-size:12px}
+.card .img{aspect-ratio:1;width:100%;max-width:100%;background:#000;border-radius:6px;overflow:hidden;display:flex;align-items:center;justify-content:center;border:3px solid transparent}
+.card img{max-width:100%;max-height:100%;display:block}
+.card .cap{display:flex;justify-content:space-between;gap:4px;flex-wrap:wrap;align-items:center}
+.stage-row{display:grid;grid-template-columns:90px 1fr;gap:14px;align-items:center}
+.stage-row .gallery{grid-template-columns:repeat(4,minmax(0,1fr))}
+.stage-name{font-weight:700;display:flex;flex-direction:column;gap:2px}
+.stage-name small{font-weight:400;color:var(--muted);font-size:12px}
+.pair{display:flex;flex-direction:column;gap:10px}
+.pair-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.strip{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:8px}
+.next{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.next .panel{display:flex;flex-direction:column;gap:8px}
+.next ul{margin:0;padding-left:18px;font-size:14px;display:flex;flex-direction:column;gap:4px}
+footer{font-size:12px;color:var(--muted);border-top:1px solid var(--line);padding-top:16px}
+code{font-family:var(--font-mono);font-size:.9em;background:color-mix(in srgb,var(--muted) 14%,transparent);padding:1px 5px;border-radius:4px}
+@media (max-width:760px){
+  .tiles{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .two,.next{grid-template-columns:minmax(0,1fr)}
+  .exp-row{grid-template-columns:88px 1fr 48px;gap:8px}
+  .stage-row{grid-template-columns:minmax(0,1fr)}
+  .stage-row .gallery{grid-template-columns:repeat(2,minmax(0,1fr))}
+  h1{font-size:24px}
+}
+</style>
+
+<main>
+<header>
+  <div class="eyebrow">Uni-DTHON · 배터리 열폭주 6단계 분류</div>
+  <h1>베이스라인 v7, 어디서 맞고 어디서 틀리나</h1>
+  <div class="thermo" aria-hidden="true"></div>
+  <p class="muted">센서 5개 + 열화상 밝기 통계 6개 + 과거 30초 시계열 피처(<span id="nfeat"></span>개)로 학습한 로지스틱 회귀(<code>class_weight=None</code>)의 결과입니다. Train으로 학습하고 Validation 19개 실험으로 평가했습니다.</p>
+  <div class="meta" id="meta"></div>
+</header>
+
+<section>
+  <div class="tiles" id="tiles"></div>
+  <ul class="findings" id="findings"></ul>
+</section>
+
+<section>
+  <div class="sec-head"><div class="eyebrow">단계별 성능</div><h2>1·3단계는 잘 맞고, 4·5·6단계가 점수를 깎는다</h2>
+  <p class="muted">Macro F1은 6개 단계 F1의 단순 평균이라, 샘플이 적은 4·5·6단계가 전체 점수에 1/6씩 똑같이 반영됩니다.</p></div>
+  <div class="two">
+    <div class="panel"><h3>단계별 Precision · Recall · F1</h3><div class="scroll" id="perclass"></div></div>
+    <div class="panel"><h3>혼동 행렬 <span class="muted" style="font-weight:400">(행 = 실제, 칸 색 = 행 기준 비율)</span></h3><div class="scroll" id="cm"></div></div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="eyebrow">실험별 결과</div><h2>Validation 19개 실험: 실제 단계 vs 예측 단계</h2>
+  <p class="muted">각 실험의 위 띠가 실제 단계, 아래 띠가 예측입니다. 시간은 왼쪽에서 오른쪽, 길이는 실험마다 맞춰 늘렸습니다. F1이 낮은 순으로 정렬했습니다.</p></div>
+  <div class="legend" id="legend"></div>
+  <div class="panel" id="exps"></div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="eyebrow">이미지로 보는 실패</div><h2 id="strip-title"></h2>
+  <p class="muted" id="strip-desc"></p></div>
+  <div class="panel strip" id="strip"></div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="eyebrow">헷갈리는 쌍</div><h2>가장 많이 틀린 4가지 경우</h2>
+  <p class="muted">실제 단계와 예측 단계가 다른 Validation 샘플을 서로 다른 실험에서 골랐습니다. 이미지 아래 숫자는 관측 시점(초)과 모델 확신도입니다.</p></div>
+  <div id="pairs" style="display:flex;flex-direction:column;gap:28px"></div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="eyebrow">맞힌 예시</div><h2>단계별로 맞힌 열화상</h2>
+  <p class="muted">색은 절대 온도가 아니라 이미지마다 따로 정규화된 것으로 보입니다. 1단계에도 빨간색이 나오는 이유입니다. 밝기 통계보다 열이 퍼진 모양이 단서가 될 가능성이 큽니다.</p></div>
+  <div class="panel" id="correct" style="display:flex;flex-direction:column;gap:16px"></div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="eyebrow">모델 내부</div><h2>모델이 기대는 피처와 검증 안정성</h2></div>
+  <div class="two">
+    <div class="panel"><h3>계수 크기 상위 12개 <span class="muted" style="font-weight:400">(표준화 후 6개 단계 |계수| 평균)</span></h3><div class="scroll" id="imp"></div></div>
+    <div class="panel" style="display:flex;flex-direction:column;gap:14px"><h3>Train 실험 단위 5-Fold CV</h3><div class="scroll" id="cvtab"></div>
+      <h3>단계 분포</h3><div class="scroll" id="dist"></div></div>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><div class="eyebrow">다음 단계</div><h2>세 명이 나눠 볼 개선 방향</h2></div>
+  <div class="next">
+    <div class="panel"><h3>센서·시계열</h3><ul>
+      <li>가스 10종(CO, CH4 등), <code>thermal_t</code>, <code>atmp_t</code> 추가: 지금은 하나도 안 씀</li>
+      <li>윈도우 30초 외에 60·120·300초, 기울기(°C/s)</li>
+      <li>실험 시작 시점 대비 변화량(과거만 사용)</li>
+      <li><code>indu_t.1</code>은 Test에서 100% 결측이라 제외</li></ul></div>
+    <div class="panel"><h3>이미지</h3><ul>
+      <li>밝기 통계 → CNN 임베딩(사전학습 모델, GPU 사용)</li>
+      <li>고온 영역 면적·개수·위치처럼 퍼짐을 보는 피처</li>
+      <li>실험마다 이미지 크기·구도가 달라 resize·augmentation 필요</li></ul></div>
+    <div class="panel"><h3>모델·검증</h3><ul>
+      <li>트리 모델(LightGBM 등)로 비선형 경계 학습</li>
+      <li>단계는 시간에 따라 내려가지 않음 → 과거 예측 기반 단조 후처리</li>
+      <li>Validation은 실험 1개에 크게 흔들리므로 CV를 기준으로 선택</li></ul></div>
+  </div>
+</section>
+
+<footer id="foot"></footer>
+</main>
+
+<script id="data" type="application/json">__DATA__</script>
+<script>
+const D = JSON.parse(document.getElementById('data').textContent);
+const L = [1,2,3,4,5,6];
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const sc = l => `var(--s${l})`;
+const f3 = x => x.toFixed(3);
+const el = (tag, attrs = {}, html = '') => { const e = document.createElement(tag); for (const k in attrs) e.setAttribute(k, attrs[k]); e.innerHTML = html; return e; };
+const chip = l => `<span class="chip" style="background:${sc(l)}">S${l}</span>`;
+const NS = 'http://www.w3.org/2000/svg';
+const svg = (w, h, inner) => `<svg viewBox="0 0 ${w} ${h}" width="100%" style="max-width:${w}px;min-width:${Math.min(w,320)}px" role="img">${inner}</svg>`;
+
+// header
+document.getElementById('nfeat').textContent = D.counts.features;
+const c = D.counts;
+document.getElementById('meta').innerHTML =
+  `<span>Train <b class="num">${c.train[0].toLocaleString()}</b>행 · ${c.train[1]}개 실험</span>` +
+  `<span>Validation <b class="num">${c.validation[0].toLocaleString()}</b>행 · ${c.validation[1]}개 실험</span>` +
+  `<span>Test <b class="num">${c.test[0].toLocaleString()}</b>행 · ${c.test[1]}개 실험</span>`;
+
+// tiles
+const cvm = D.cv.none.folds.reduce((a,b)=>a+b)/D.cv.none.folds.length;
+const cvs = Math.sqrt(D.cv.none.folds.reduce((a,b)=>a+(b-cvm)**2,0)/D.cv.none.folds.length);
+const worst = D.exps.slice().sort((a,b)=>a.f1-b.f1)[0];
+const tiles = [
+  ['Validation Macro F1', f3(D.val_f1), 'hl'],
+  ['Train CV Macro F1', `${f3(cvm)}<span class="muted" style="font-size:15px"> ±${cvs.toFixed(3)}</span>`, ''],
+  ['Validation 정확도', f3(D.val_acc), ''],
+  [`실험 1개(${worst.id.slice(0,10)}) 제외 시`, f3(D.excl_f1), ''],
+];
+document.getElementById('tiles').innerHTML = tiles.map(([k,v,cl]) => `<div class="tile ${cl}"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
+
+// findings
+const p54 = D.confusions.find(x=>x.y===5&&x.p===4), p32 = D.confusions.find(x=>x.y===3&&x.p===2);
+const finds = [
+  `<b>Validation 점수가 CV보다 0.13 낮은 건 대부분 실험 하나 때문입니다.</b> <span class="mono">${worst.id.slice(0,10)}</span>은 ${worst.rows.toLocaleString()}행으로 Validation의 ${Math.round(worst.rows/c.validation[0]*100)}%를 차지하고, 4단계 없이 5단계가 ${D.worst_s5}행 이어집니다. 5→4 오분류 ${p54.n}건 중 ${D.worst_54}건이 이 실험에서 나왔고, 이 실험을 빼면 Macro F1이 ${f3(D.excl_f1)}로 CV와 비슷해집니다.`,
+  `<b>인접 단계끼리만 헷갈립니다.</b> 오분류 대부분이 5→4(${p54.n}건)와 3→2(${p32.n}건)이고, 1단계와 6단계를 뒤바꾸는 식의 큰 실수는 거의 없습니다. 단계 경계 근처를 잘 가르는 피처가 핵심입니다.`,
+  `<b>모델은 거의 온도(<code>meas_t1</code>)와 전압에만 기대고 있습니다.</b> 계수 상위가 <code>meas_t1</code> 계열과 <code>meas_v</code> 계열이고, 이미지 피처는 <code>img_p99_mean30s</code> 하나만 10위에 들어갑니다. 가스 센서 10종은 아직 쓰지 않았습니다.`,
+  `<b>예측이 시간에 따라 거꾸로 가는 곳이 ${D.exps.reduce((a,e)=>a+e.backsteps,0)}번 있습니다.</b> 실제 단계는 모든 실험에서 1→6 방향으로만 움직이므로, 과거 예측을 이용해 단계가 내려가지 않게 하는 후처리로 바로 개선할 수 있습니다.`,
+];
+document.getElementById('findings').innerHTML = finds.map((t,i)=>`<li><span class="n">${i+1}</span><span>${t}</span></li>`).join('');
+
+// per-class grouped bars
+(function(){
+  const W=480,H=250,ml=36,mb=34,mt=10,cw=(W-ml-8)/6, bw=cw/4.2;
+  const y = v => mt + (1-v)*(H-mt-mb);
+  const keys=[['precision',0.45],['recall',0.7],['f1',1]];
+  let g='';
+  for (let t=0;t<=1.001;t+=0.25){ g+=`<line x1="${ml}" x2="${W-4}" y1="${y(t)}" y2="${y(t)}" stroke="var(--line)"/><text x="${ml-6}" y="${y(t)+4}" text-anchor="end" font-size="11" class="t-muted">${t.toFixed(2)}</text>`; }
+  L.forEach((l,i)=>{
+    const x0 = ml + i*cw + (cw-3*bw-4)/2;
+    keys.forEach(([k,op],j)=>{ const v=D.per_class[k][i]; g+=`<rect x="${x0+j*(bw+2)}" y="${y(v)}" width="${bw}" height="${y(0)-y(v)}" fill="${sc(l)}" fill-opacity="${op}" rx="2"><title>S${l} ${k} ${f3(v)}</title></rect>`; });
+    const f=D.per_class.f1[i];
+    g+=`<text x="${x0+2*(bw+2)+bw/2}" y="${y(f)-4}" text-anchor="middle" font-size="10.5" font-family="var(--font-mono)">${f.toFixed(2)}</text>`;
+    g+=`<text x="${ml+i*cw+cw/2}" y="${H-mb+16}" text-anchor="middle" font-size="12" font-weight="700">S${l}</text>`;
+    g+=`<text x="${ml+i*cw+cw/2}" y="${H-mb+29}" text-anchor="middle" font-size="10" class="t-muted">n=${D.per_class.support[i]}</text>`;
+  });
+  document.getElementById('perclass').innerHTML = svg(W,H,g) + `<div class="legend muted" style="margin-top:6px"><span><i class="sw" style="background:var(--muted);opacity:.45"></i>Precision</span><span><i class="sw" style="background:var(--muted);opacity:.7"></i>Recall</span><span><i class="sw" style="background:var(--muted)"></i>F1 (숫자)</span></div>`;
+})();
+
+// confusion matrix
+(function(){
+  const s=50, ml=58, mt=30, W=ml+6*s+4, H=mt+6*s+4;
+  let g='';
+  L.forEach((l,j)=>{ g+=`<text x="${ml+j*s+s/2}" y="${mt-10}" text-anchor="middle" font-size="12" font-weight="700">예측 ${l}</text>`; });
+  D.cm.forEach((row,i)=>{
+    const tot=row.reduce((a,b)=>a+b,0);
+    g+=`<text x="${ml-8}" y="${mt+i*s+s/2+4}" text-anchor="end" font-size="12" font-weight="700">실제 ${L[i]}</text>`;
+    row.forEach((v,j)=>{
+      const r=v/tot, diag=i===j;
+      const col = diag ? 'var(--good)' : 'var(--bad)';
+      g+=`<rect x="${ml+j*s+1}" y="${mt+i*s+1}" width="${s-2}" height="${s-2}" rx="4" fill="${v?col:'var(--line)'}" fill-opacity="${v?Math.max(0.08,Math.min(0.9,r)):0.35}"><title>실제 ${L[i]} → 예측 ${L[j]}: ${v}건 (${(r*100).toFixed(1)}%)</title></rect>`;
+      if (v) g+=`<text x="${ml+j*s+s/2}" y="${mt+i*s+s/2+4}" text-anchor="middle" font-size="11.5" font-family="var(--font-mono)" font-weight="${r>0.15?700:400}">${v}</text>`;
+    });
+  });
+  document.getElementById('cm').innerHTML = svg(W,H,g) + `<div class="legend muted" style="margin-top:6px"><span><i class="sw" style="background:var(--good)"></i>맞힘</span><span><i class="sw" style="background:var(--bad)"></i>틀림 (진할수록 그 행에서 비율이 큼)</span></div>`;
+})();
+
+// legend
+document.getElementById('legend').innerHTML = L.map(l=>`<span><i class="sw" style="background:${sc(l)}"></i>${l}단계</span>`).join('');
+
+// experiment timelines (canvas, redrawn on theme change/resize)
+const expBox = document.getElementById('exps');
+const sorted = D.exps.slice().sort((a,b)=>a.f1-b.f1);
+sorted.forEach(e=>{
+  const row = el('div',{class:'exp-row'+(e.id===worst.id?' flag':'')});
+  row.innerHTML = `<div class="exp-id">${e.id.slice(0,10)}<small>${e.rows}행 · class ${e.bat_class} · ${e.bat_cc}Ah</small></div>
+    <div class="bars"><canvas data-k="y" aria-label="실제 단계"></canvas><canvas data-k="p" aria-label="예측 단계"></canvas></div>
+    <div class="exp-f1" style="color:${e.f1<0.6?'var(--bad)':'var(--fg)'}">${e.f1.toFixed(2)}</div>`;
+  row._e = e; expBox.appendChild(row);
+});
+expBox.insertAdjacentHTML('afterbegin', `<div class="exp-row" style="padding-top:0"><div class="eyebrow">실험</div><div class="eyebrow">위: 실제 · 아래: 예측</div><div class="eyebrow" style="text-align:right">F1</div></div>`);
+function drawExps(){
+  const cols = L.map(l=>css(`--s${l}`));
+  expBox.querySelectorAll('.exp-row').forEach(row=>{
+    if(!row._e) return;
+    row.querySelectorAll('canvas').forEach(cv=>{
+      const seq=row._e[cv.dataset.k], w=cv.clientWidth, h=12, dpr=window.devicePixelRatio||1;
+      if(!w) return;
+      cv.width=w*dpr; cv.height=h*dpr; const ctx=cv.getContext('2d'); ctx.scale(dpr,dpr);
+      const step=w/seq.length;
+      seq.forEach((v,i)=>{ ctx.fillStyle=cols[v-1]; ctx.fillRect(i*step,0,step+0.6,h); });
+    });
+  });
+}
+drawExps();
+new ResizeObserver(drawExps).observe(expBox);
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change',drawExps);
+new MutationObserver(drawExps).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
+
+// cards
+function card(c, showPred=true){
+  const ok=c.y===c.p;
+  return `<div class="card"><div class="img" style="border-color:${sc(c.y)}"><img src="${c.src}" alt="${c.y}단계 열화상, ${c.t}초" loading="lazy"></div>
+    <div class="cap"><span>${chip(c.y)}${showPred?` → <span class="chip" style="background:${sc(c.p)}">S${c.p}</span>`:''}</span><span class="mono muted">${c.t}s · ${Math.round(c.conf*100)}%</span></div></div>`;
+}
+
+// worst experiment strip
+document.getElementById('strip-title').textContent = `F1이 가장 낮은 실험 ${worst.id.slice(0,10)} (F1 ${worst.f1.toFixed(2)})`;
+document.getElementById('strip-desc').textContent = `실제 단계마다 시작·중간·끝 시점의 이미지를 골랐습니다. 테두리 색이 실제 단계, 칩 오른쪽이 모델의 예측입니다. 5단계 이미지 대부분을 4단계로 예측했습니다.`;
+document.getElementById('strip').innerHTML = D.strip.cards.map(c=>card(c)).join('');
+
+// confusion pairs
+document.getElementById('pairs').innerHTML = D.confusions.map(p=>`<div class="pair">
+  <div class="pair-head">${chip(p.y)}<span>실제 ${p.y}단계를</span>${chip(p.p)}<span>${p.p}단계로 예측</span><span class="mono muted">${p.n}건</span></div>
+  <div class="gallery">${p.cards.map(c=>card(c)).join('')}</div></div>`).join('');
+
+// correct examples
+const names={1:'정상',2:'개시',3:'가속',4:'폭주 진입',5:'폭주',6:'전파'};
+document.getElementById('correct').innerHTML = L.map(l=>`<div class="stage-row">
+  <div class="stage-name" style="color:${sc(l)}">${l}단계<small>F1 ${D.per_class.f1[l-1].toFixed(2)}</small></div>
+  <div class="gallery">${D.correct[l].map(c=>card(c,false)).join('')}</div></div>`).join('');
+
+// importance
+(function(){
+  const rows=D.importance, W=460, rh=24, ml=150, H=rows.length*rh+8, max=rows[0][1];
+  let g='';
+  rows.forEach(([k,v],i)=>{
+    const img=k.startsWith('img'), w=(W-ml-50)*v/max;
+    g+=`<text x="${ml-8}" y="${i*rh+16}" text-anchor="end" font-size="11.5" font-family="var(--font-mono)">${k}</text>`;
+    g+=`<rect x="${ml}" y="${i*rh+5}" width="${w}" height="${rh-10}" rx="3" fill="${img?'var(--s6)':'var(--accent)'}" fill-opacity="${img?1:0.8}"/>`;
+    g+=`<text x="${ml+w+6}" y="${i*rh+16}" font-size="11" font-family="var(--font-mono)" class="t-muted">${v.toFixed(2)}</text>`;
+  });
+  document.getElementById('imp').innerHTML = svg(W,H,g) + `<div class="legend muted" style="margin-top:6px"><span><i class="sw" style="background:var(--accent)"></i>센서</span><span><i class="sw" style="background:var(--s6)"></i>이미지</span></div>`;
+})();
+
+// CV table
+const cvRow = (name,o)=>{ const m=o.folds.reduce((a,b)=>a+b)/o.folds.length; return `<tr><td>${name}</td>${o.folds.map(f=>`<td class="num">${f3(f)}</td>`).join('')}<td class="num"><b>${f3(m)}</b></td><td class="num">${f3(o.val)}</td></tr>`; };
+document.getElementById('cvtab').innerHTML = `<table><thead><tr><th>class_weight</th><th>F1</th><th>F2</th><th>F3</th><th>F4</th><th>F5</th><th>CV 평균</th><th>Valid.</th></tr></thead><tbody>${cvRow('None (사용)',D.cv.none)}${cvRow('balanced',D.cv.balanced)}</tbody></table>
+<p class="muted" style="font-size:13px;margin-top:8px">CV에서는 balanced가 조금 낫고 Validation에서는 None이 낫습니다. 실험 19개짜리 Validation은 순위를 가리기에 흔들림이 큽니다.</p>`;
+
+// distribution
+const dist = D.label_dist, tr=c.train[0], va=c.validation[0], te=c.test[0];
+document.getElementById('dist').innerHTML = `<table><thead><tr><th>단계</th><th>Train</th><th>Validation</th><th>Test 예측</th></tr></thead><tbody>${L.map((l,i)=>`<tr><td>${chip(l)}</td><td class="num">${(dist.train[i]/tr*100).toFixed(1)}%</td><td class="num">${(dist.validation[i]/va*100).toFixed(1)}%</td><td class="num">${(dist.test_pred[i]/te*100).toFixed(1)}%</td></tr>`).join('')}</tbody></table>`;
+
+document.getElementById('foot').innerHTML = `만든 날 2026-11-14 · 코드: <code>uni_d_baseline_v7/model.py</code>와 같은 피처·모델, <code>SEED=42</code>. 이미지는 Validation 샘플 썸네일입니다. 수치는 노트북 결과(Validation Macro F1 0.6778)와 일치합니다.`;
+</script>

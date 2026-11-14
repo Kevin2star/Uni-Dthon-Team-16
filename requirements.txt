@@ -1,0 +1,14 @@
+# Python 3.10.12 에서 확인한 버전
+numpy==2.2.6
+pandas==2.3.3
+scipy==1.15.3
+scikit-learn==1.7.2
+lightgbm==4.7.0
+joblib==1.6.0
+pillow==12.3.0
+matplotlib==3.10.9
+
+# CNN 임베딩용 (CUDA 12.8 빌드). 설치:
+#   pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
+torch==2.11.0
+torchvision==0.26.0

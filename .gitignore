@@ -1,0 +1,41 @@
+# ===== 대회 데이터·파생물: 절대 올리지 않음 =====
+stage_samples/
+experiments/**/stage_samples
+cache/
+*.npy
+!src/thermal_palette.npy
+!experiments/common/thermal_palette.npy
+*.npz
+outputs/*.csv
+outputs/*.html
+experiments/**/monotone_preds_*.csv
+experiments/**/ordinal_probs_*.csv
+experiments/v01_baseline/submission.csv
+experiments/v01_baseline/baseline_report.html
+
+# 열화상 원본 이미지가 들어간 그림 (수치 그래프만 올림)
+outputs/viz/grid_*.png
+outputs/viz/stage_sheet_*.png
+outputs/viz/what_is_experiment_look.png
+outputs/viz/exp_*.png
+outputs/viz/firstframe.png
+experiments/**/grid_*.png
+experiments/**/stage_sheet_*.png
+experiments/**/what_is_experiment_look.png
+experiments/**/exp_*.png
+experiments/**/firstframe.png
+
+# 주최 측 노트북(데이터 출력 포함)·캐시
+uni_d_baseline_v7/*.ipynb
+uni_d_baseline_v7/work/
+experiments/v01_baseline/*.ipynb
+
+# 데이터 공유 링크가 들어 있음
+setup.sh
+
+# 개인 테스트·자동 생성
+test.ipynb
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+*.log.tmp
