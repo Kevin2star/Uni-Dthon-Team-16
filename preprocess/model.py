@@ -27,13 +27,26 @@ SEQ_WINDOW_S = 300.0
 
 # 회색 최댓값은 대부분의 프레임이 243에 고정되므로 넣지 않습니다.
 # 상한에 닿은 면적은 밝기 0.9 이상 비율로 둡니다.
+# 프레임마다 색을 다시 늘리면 밝기 자체는 단계가 아닙니다.
+# 그 프레임의 중간값과 최댓값 사이에서 뜨거운 쪽이 어디에 퍼졌는지만 봅니다.
+REL_SHAPE_COLUMNS = [
+    'img_rel_spread_x', 'img_rel_spread_y', 'img_rel_x_share', 'img_rel_second', 'img_rel_edge',
+]
 IMAGE_STATS = [
     'img_mean', 'img_std', 'img_p95', 'img_p99', 'img_hot90',
     'r_p95', 'r_p99', 'r_hot90', 'g_p95', 'g_p99', 'g_hot90', 'b_p95', 'b_p99', 'b_hot90',
     'pal_p95', 'pal_p99', 'pal_hot90', 'img_blob_max', 'img_cent_x', 'img_cent_y',
+    *REL_SHAPE_COLUMNS,
 ]
 # 창 피처에 쓰는 이미지 신호. img_max는 넣지 않습니다.
 IMAGE_WINDOW_SIGNALS = ['img_p99', 'img_hot90', 'pal_p99', 'pal_hot90']
+# 덩어리 크기와 중심, 프레임 안 상대 퍼짐은 4·5단계에서도 계속 움직입니다.
+SHAPE_WINDOW_SIGNALS = ['img_blob_max', 'img_cent_x', 'img_cent_y', *REL_SHAPE_COLUMNS]
+# 셀 용량과 무관한 인과 척도. 실험 전체 최댓값이 아니라 현재까지의 최댓값만 씁니다.
+SCALE_FREE_COLUMNS = [
+    'meas_v_frac_peak', 'meas_t1_below_peak', 'meas_t2_below_peak',
+    'meas_t1_rise_frac', 'meas_t2_rise_frac', 'meas_t_gap',
+]
 NAMED_EXTRA = ['thermal_t', 'atmp_t', 'indu_t', 'bat_class', 'bat_cc', 'soc_status', 'tr_method']
 # indu_t.1은 같은 이름이 두 번인 열입니다. Train 결측이 79%입니다.
 # meas_t1_plus_t2는 Train 전 행에서 meas_t1+meas_t2와 같습니다.
@@ -57,6 +70,14 @@ PALETTE_WHITE_SAT = 0.15
 PALETTE_WHITE_VALUE = 0.9
 PALETTE_BLACK_VALUE = 0.05
 CEILING = 0.9
+# 프레임 자신의 (최댓값-중간값) 중 이 비율 이상을 뜨거운 쪽으로 둡니다. 데이터로 맞추지 않습니다.
+REL_HOT_FRACTION = 0.5
+# 이 값보다 색 차이가 작으면 열이 퍼진 모양을 만들지 않습니다.
+FLAT_PALETTE_SPAN = 0.02
+# 화면 가장자리 띠. 중심 핫스팟과 가장자리 분출을 나눕니다.
+REL_EDGE_BAND = 0.25
+# 지금까지의 전압 최댓값이 이 값 이하면 비율을 비웁니다. 0으로 나누지 않기 위한 값입니다.
+PEAK_VOLT_EPS = 0.05
 
 TABULAR_MODELS = ['lightgbm', 'xgboost', 'catboost', 'extratrees', 'histgb', 'cumulative']
 # gru_efficientnet은 저장된 가중치를 읽을 수 있게만 남겨 둡니다. 새 실험 목록에는 없습니다.
@@ -105,8 +126,13 @@ def _temperature_like(column: str) -> bool:
 
 
 def _wants_slope(signal: str) -> bool:
-    """초당 기울기. 가스·온도와 이미지 상한 면적에만 둡니다. 창 안 행 개수는 쓰지 않습니다."""
-    return _temperature_like(signal) or signal in GAS_COLUMNS or signal in IMAGE_WINDOW_SIGNALS
+    """초당 기울기. 가스·온도, 이미지 상한 면적, 덩어리·중심에만 둡니다. 창 안 행 개수는 쓰지 않습니다."""
+    return (
+        _temperature_like(signal)
+        or signal in GAS_COLUMNS
+        or signal in IMAGE_WINDOW_SIGNALS
+        or signal in SHAPE_WINDOW_SIGNALS
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -129,14 +155,65 @@ def resolve_image_paths(frame: pd.DataFrame, roots: list[Path]) -> pd.Series:
     return candidate
 
 
-def _blob_max_ratio(mask: np.ndarray) -> float:
-    """가장 큰 덩어리가 차지하는 픽셀 비율. 덩어리 개수는 해상도에 따라 달라지므로 쓰지 않습니다."""
+def _blob_sizes(mask: np.ndarray) -> np.ndarray:
     labeled, count = ndimage.label(mask)
     if count == 0:
-        return 0.0
+        return np.zeros(0, dtype=np.int64)
     sizes = np.bincount(labeled.ravel())
     sizes[0] = 0
+    return sizes[sizes > 0]
+
+
+def _blob_max_ratio(mask: np.ndarray) -> float:
+    """가장 큰 덩어리가 차지하는 픽셀 비율. 덩어리 개수는 해상도에 따라 달라지므로 쓰지 않습니다."""
+    sizes = _blob_sizes(mask)
+    if len(sizes) == 0:
+        return 0.0
     return float(sizes.max()) / float(mask.size)
+
+
+def _blob_second_ratio(mask: np.ndarray) -> float:
+    """두 번째 덩어리 / 가장 큰 덩어리. 절대 개수는 해상도에 따라 달라지므로 쓰지 않습니다."""
+    sizes = _blob_sizes(mask)
+    if len(sizes) == 0:
+        return 0.0
+    largest = float(sizes.max())
+    if len(sizes) == 1 or largest == 0:
+        return 0.0
+    second = float(np.partition(sizes, -2)[-2])
+    return second / largest
+
+
+def _relative_shape(index: np.ndarray) -> list[float]:
+    """이 프레임 안에서만 뜨거운 쪽의 퍼짐. 절대 밝기 기준은 쓰지 않습니다."""
+    finite = index[np.isfinite(index)]
+    empty = [0.0, 0.0, np.nan, 0.0, np.nan]
+    if finite.size == 0:
+        return empty
+    mid = float(np.percentile(finite, 50))
+    span = float(np.max(finite) - mid)
+    if span < FLAT_PALETTE_SPAN:
+        return empty
+    warm = index >= (mid + REL_HOT_FRACTION * span)
+    ys, xs = np.where(warm)
+    if len(ys) == 0:
+        return empty
+    height, width = index.shape
+    spread_x = float(xs.std() / max(width - 1, 1))
+    spread_y = float(ys.std() / max(height - 1, 1))
+    total = spread_x + spread_y
+    share = spread_x / total if total > 1e-8 else np.nan
+    y0, y1 = int(round(height * REL_EDGE_BAND)), int(round(height * (1.0 - REL_EDGE_BAND)))
+    x0, x1 = int(round(width * REL_EDGE_BAND)), int(round(width * (1.0 - REL_EDGE_BAND)))
+    inner = np.zeros(warm.shape, dtype=bool)
+    if y1 > y0 and x1 > x0:
+        inner[y0:y1, x0:x1] = True
+    edge = float((warm & ~inner).sum() / warm.sum())
+    small = np.asarray(
+        Image.fromarray(warm.astype(np.uint8) * 255).resize((BLOB_SIZE, BLOB_SIZE), Image.NEAREST),
+        dtype=np.uint8,
+    )
+    return [spread_x, spread_y, share, _blob_second_ratio(small >= 128), edge]
 
 
 def _channel_stats(channel: np.ndarray) -> tuple[float, float, float]:
@@ -212,6 +289,7 @@ def _image_stats(path) -> list[float]:
         max_area,
         cent_x,
         cent_y,
+        *_relative_shape(index),
     ]
 
 
@@ -345,18 +423,70 @@ def _from_start(times: np.ndarray, values: np.ndarray) -> np.ndarray:
     return values - anchor
 
 
-# 실험 시작점 대비 상승이 이 값을 처음 넘은 뒤의 경과 시간(초).
-# 온도는 섭씨, 뜨거운 면적은 비율 포인트입니다. Validation으로 고르지 않습니다.
+# 실험 시작점 대비 변화가 이 값을 처음 넘은 뒤의 경과 시간(초).
+# 온도는 섭씨, 뜨거운 면적은 비율, 전압 하락은 볼트입니다. Validation으로 고르지 않습니다.
 RISE_LEVELS = {
     'meas_t1': (10.0, 30.0, 50.0),
+    'meas_t2': (10.0, 30.0, 50.0),
     'img_hot90': (0.05, 0.10, 0.20),
 }
+DROP_LEVELS = {
+    'meas_v': (0.2, 0.5, 1.0),
+}
+# 낮은 단계 확률이 직전 단계보다 이 값 이상 클 때만 단계를 내립니다.
+SOFT_MONOTONE_MARGIN = 0.05
+# 표면 온도 변화가 이 값보다 작으면 전압/온도 비율은 0입니다. Validation으로 고르지 않습니다.
+VOLT_TEMP_MIN_C = 1.0
 
 
 def rise_column(signal: str, level: float) -> str:
-    if signal == 'meas_t1':
+    if signal.startswith('meas_t'):
         return f'{signal}_since{int(level)}c'
     return f'{signal}_since{int(round(level * 100)):02d}'
+
+
+def drop_column(signal: str, level: float) -> str:
+    return f'{signal}_sincedrop{f"{level:.1f}".replace(".", "p")}'
+
+
+def gas_onset_column(signal: str) -> str:
+    return f'{signal}_since_on'
+
+
+def volt_temp_column(window: float) -> str:
+    return f'meas_v_per_t1_{int(window)}s'
+
+
+def shape_feature_names() -> list[str]:
+    """덩어리·중심의 과거 창과, 표면 온도 대비 전압 변화. 기준점은 새로 고르지 않습니다."""
+    names = []
+    for signal in SHAPE_WINDOW_SIGNALS:
+        for window in WINDOWS:
+            width = int(window)
+            names.extend([
+                f'{signal}_mean{width}s',
+                f'{signal}_max{width}s',
+                f'{signal}_delta{width}s',
+                f'{signal}_slope{width}s',
+            ])
+        names.append(f'{signal}_from_start')
+    names.extend(volt_temp_column(window) for window in WINDOWS)
+    return names
+
+
+def voltage_per_surface(causal: pd.DataFrame) -> pd.DataFrame:
+    """같은 창의 전압 변화 / 표면 온도 변화. 온도 변화가 1°C 미만이면 0이고, 미래는 쓰지 않습니다."""
+    columns = {}
+    for window in WINDOWS:
+        voltage = causal[f'meas_v_delta{int(window)}s'].to_numpy(dtype=float)
+        temperature = causal[f'meas_t1_delta{int(window)}s'].to_numpy(dtype=float)
+        ratio = np.full(len(causal), np.nan, dtype=np.float64)
+        finite = np.isfinite(voltage) & np.isfinite(temperature)
+        usable = finite & (np.abs(temperature) >= VOLT_TEMP_MIN_C)
+        ratio[usable] = voltage[usable] / temperature[usable]
+        ratio[finite & ~usable] = 0.0
+        columns[volt_temp_column(window)] = ratio
+    return pd.DataFrame(columns, index=causal.index)
 
 
 def _seconds_since_rise(times: np.ndarray, rise: np.ndarray, level: float) -> np.ndarray:
@@ -383,6 +513,10 @@ def add_causal_features(base: pd.DataFrame, signals: list[str], slope_signals: l
         columns.append(f'{signal}_from_start')
         for level in RISE_LEVELS.get(signal, ()):
             columns.append(rise_column(signal, level))
+        for level in DROP_LEVELS.get(signal, ()):
+            columns.append(drop_column(signal, level))
+        if signal in GAS_COLUMNS:
+            columns.append(gas_onset_column(signal))
     out = pd.DataFrame(np.nan, index=base.index, columns=columns)
     times_all = base['relative_time_s'].to_numpy(dtype=float)
     for _, positions in base.groupby('experiment_id', sort=False).indices.items():
@@ -396,6 +530,12 @@ def add_causal_features(base: pd.DataFrame, signals: list[str], slope_signals: l
             for level in RISE_LEVELS.get(signal, ()):
                 elapsed = _seconds_since_rise(times, start, level)
                 out.iloc[positions, out.columns.get_loc(rise_column(signal, level))] = elapsed
+            for level in DROP_LEVELS.get(signal, ()):
+                elapsed = _seconds_since_rise(times, -start, level)
+                out.iloc[positions, out.columns.get_loc(drop_column(signal, level))] = elapsed
+            if signal in GAS_COLUMNS:
+                elapsed = _seconds_since_rise(times, values, np.nextafter(0.0, 1.0))
+                out.iloc[positions, out.columns.get_loc(gas_onset_column(signal))] = elapsed
             for k, window in enumerate(WINDOWS):
                 width = int(window)
                 out.iloc[positions, out.columns.get_loc(f'{signal}_mean{width}s')] = means[k]
@@ -423,6 +563,78 @@ def enforce_causal_monotone(frame: pd.DataFrame, labels) -> np.ndarray:
     return labels
 
 
+def enforce_soft_monotone(frame: pd.DataFrame, proba, margin: float = SOFT_MONOTONE_MARGIN) -> np.ndarray:
+    """단계를 내리려면 그 단계 확률이 직전 단계보다 margin 이상 커야 합니다. 미래는 보지 않습니다."""
+    proba = np.asarray(proba, dtype=float)
+    labels = (np.argmax(proba, axis=1) + 1).astype(int)
+    work = pd.DataFrame({
+        'experiment_id': frame['experiment_id'].astype(str).to_numpy(),
+        'relative_time_s': pd.to_numeric(frame['relative_time_s'], errors='coerce').to_numpy(),
+        'row': np.arange(len(labels)),
+    })
+    for _, sub in work.groupby('experiment_id', sort=False):
+        sub = sub.sort_values(['relative_time_s', 'row'], kind='mergesort')
+        running = 0
+        for row in sub['row'].to_numpy():
+            choice = int(labels[row])
+            if running == 0 or choice >= running:
+                running = choice
+            elif proba[row, choice - 1] > proba[row, running - 1] + margin:
+                running = choice
+            labels[row] = running
+    return labels
+
+
+def _temp_progress(value: float, peak: float, first: float) -> tuple[float, float, float, float]:
+    """현재까지의 최고점 대비 위치. 이후 시점의 최고점은 쓰지 않습니다."""
+    if not np.isfinite(value):
+        return peak, first, np.nan, np.nan
+    if not np.isfinite(first):
+        first = value
+    peak = value if not np.isfinite(peak) else max(peak, value)
+    below = peak - value
+    span = peak - first
+    rise = (value - first) / span if span >= VOLT_TEMP_MIN_C else 0.0
+    return peak, first, below, rise
+
+
+def add_scale_free(base: pd.DataFrame) -> pd.DataFrame:
+    """용량이 다른 셀에도 같은 의미인 척도. 각 시각의 값은 그 시각까지의 관측만 사용합니다."""
+    n = len(base)
+    frac = np.full(n, np.nan)
+    t1_below = np.full(n, np.nan)
+    t2_below = np.full(n, np.nan)
+    t1_rise = np.full(n, np.nan)
+    t2_rise = np.full(n, np.nan)
+    voltage = base['meas_v'].to_numpy(dtype=float)
+    surface = base['meas_t1'].to_numpy(dtype=float)
+    anode = base['meas_t2'].to_numpy(dtype=float)
+    gap = anode - surface
+    for _, positions in base.groupby('experiment_id', sort=False).indices.items():
+        positions = _sorted_positions(base, np.asarray(positions))
+        peak_v = np.nan
+        peak_t1 = np.nan
+        peak_t2 = np.nan
+        first_t1 = np.nan
+        first_t2 = np.nan
+        for row in positions:
+            value = voltage[row]
+            if np.isfinite(value):
+                peak_v = value if not np.isfinite(peak_v) else max(peak_v, value)
+                if peak_v > PEAK_VOLT_EPS:
+                    frac[row] = value / peak_v
+            peak_t1, first_t1, t1_below[row], t1_rise[row] = _temp_progress(surface[row], peak_t1, first_t1)
+            peak_t2, first_t2, t2_below[row], t2_rise[row] = _temp_progress(anode[row], peak_t2, first_t2)
+    return pd.DataFrame({
+        'meas_v_frac_peak': frac,
+        'meas_t1_below_peak': t1_below,
+        'meas_t2_below_peak': t2_below,
+        'meas_t1_rise_frac': t1_rise,
+        'meas_t2_rise_frac': t2_rise,
+        'meas_t_gap': gap,
+    }, index=base.index)
+
+
 def numeric(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     return frame[columns].apply(pd.to_numeric, errors='coerce').replace([np.inf, -np.inf], np.nan)
 
@@ -441,11 +653,25 @@ def build_features(frame: pd.DataFrame, image_features: pd.DataFrame) -> pd.Data
     image = image_features.reindex(frame['sample_id'].astype(str).to_numpy()).reindex(columns=IMAGE_STATS)
     assert image['img_mean'].notna().all(), '이미지 피처가 없는 샘플이 있습니다.'
     base[IMAGE_STATS] = image.to_numpy()
-    signals = sensor_columns + IMAGE_WINDOW_SIGNALS
-    slopes = [column for column in signals if _wants_slope(column)]
+    scale = add_scale_free(base)
+    for column in SCALE_FREE_COLUMNS:
+        base[column] = scale[column].to_numpy()
+    signals = sensor_columns + IMAGE_WINDOW_SIGNALS + SHAPE_WINDOW_SIGNALS + SCALE_FREE_COLUMNS
+    slopes = [column for column in signals if _wants_slope(column) or column in SCALE_FREE_COLUMNS]
     causal = add_causal_features(base, signals, slopes)
-    current = ['relative_time_s'] + sensor_columns + IMAGE_STATS
-    return pd.concat([base[current], causal], axis=1)
+    ratio = voltage_per_surface(causal)
+    current = ['relative_time_s'] + sensor_columns + IMAGE_STATS + SCALE_FREE_COLUMNS
+    return pd.concat([base[current], causal, ratio], axis=1)
+
+
+def corrected_feature_columns(columns) -> list[str]:
+    """경과 시간으로 단계를 외우는 열은 뺍니다. 창의 변화와 용량 무관 척도는 남깁니다."""
+    kept = []
+    for column in columns:
+        if column == 'relative_time_s' or '_since' in column:
+            continue
+        kept.append(column)
+    return kept
 
 
 def sequence_columns(frame: pd.DataFrame) -> list[str]:
