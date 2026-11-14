@@ -480,10 +480,11 @@ class TabularPrep:
 
 
 class TreeModel:
-    def __init__(self, name: str, class_weight=None, seed: int = SEED):
+    def __init__(self, name: str, class_weight=None, seed: int = SEED, n_jobs: int = -1):
         self.name = name
         self.class_weight = class_weight
         self.seed = seed
+        self.n_jobs = n_jobs
         self.model = None
         self.median_ = None
         self._y_offset = 0
@@ -519,7 +520,7 @@ class TreeModel:
             from lightgbm import LGBMClassifier
             return LGBMClassifier(
                 n_estimators=TREE_ESTIMATORS, learning_rate=TREE_LEARNING_RATE, num_leaves=63,
-                subsample=0.8, colsample_bytree=0.8, random_state=self.seed, n_jobs=-1,
+                subsample=0.8, colsample_bytree=0.8, random_state=self.seed, n_jobs=self.n_jobs,
                 class_weight=weight, deterministic=True, force_row_wise=True, verbosity=-1,
             )
         if self.name == 'xgboost':
@@ -527,19 +528,19 @@ class TreeModel:
             return XGBClassifier(
                 n_estimators=TREE_ESTIMATORS, learning_rate=TREE_LEARNING_RATE, max_depth=6,
                 subsample=0.8, colsample_bytree=0.8, objective='multi:softprob',
-                random_state=self.seed, n_jobs=-1, tree_method='hist', verbosity=0,
+                random_state=self.seed, n_jobs=self.n_jobs, tree_method='hist', verbosity=0,
             )
         if self.name == 'catboost':
             from catboost import CatBoostClassifier
             return CatBoostClassifier(
                 iterations=TREE_ESTIMATORS, learning_rate=TREE_LEARNING_RATE, depth=6,
                 loss_function='MultiClass', random_seed=self.seed, verbose=False,
-                allow_writing_files=False,
+                allow_writing_files=False, thread_count=self.n_jobs,
             )
         if self.name == 'extratrees':
             from sklearn.ensemble import ExtraTreesClassifier
             return ExtraTreesClassifier(
-                n_estimators=TREE_ESTIMATORS, random_state=self.seed, n_jobs=-1, class_weight=weight,
+                n_estimators=TREE_ESTIMATORS, random_state=self.seed, n_jobs=self.n_jobs, class_weight=weight,
             )
         if self.name == 'histgb':
             from sklearn.ensemble import HistGradientBoostingClassifier
