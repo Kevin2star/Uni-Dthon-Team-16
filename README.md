@@ -39,12 +39,13 @@ python -u train.py --data_dir $D --compare tabular --model_out weights/model.job
 
 시작한 뒤 `Ctrl+B`를 누르고 `D`를 누르면 세션에서 빠지면서 학습은 계속됩니다. 다시 들어갈 때는 `tmux attach -t train-<내이름>`.
 
-딥러닝 후보와 조합은 표 모델 비교 뒤에, 각각 다른 파일로 저장합니다.
+딥러닝 후보는 표 모델 비교 뒤에 각각 다른 파일로 저장합니다. 공용 서버에서는 한 번에 하나만 실행합니다. 이미지 피처와 torch 스레드는 기본 2개입니다. gru_efficientnet은 이 목록에 없습니다.
 
 ```bash
 python -u train.py --data_dir $D --model efficientnet --model_out weights/efficientnet.joblib 2>&1 | tee train_efficientnet.log
-python -u train.py --data_dir $D --model gru_efficientnet --head coral --model_out weights/gru_coral.joblib 2>&1 | tee train_gru.log
-python -u train.py --data_dir $D --model ensemble --model_out weights/ensemble.joblib 2>&1 | tee train_ensemble.log
+python -u train.py --data_dir $D --model smallcnn --model_out weights/smallcnn.joblib 2>&1 | tee train_smallcnn.log
+python -u train.py --data_dir $D --model mobilenet --model_out weights/mobilenet.joblib 2>&1 | tee train_mobilenet.log
+python -u train.py --data_dir $D --model resnet18 --model_out weights/resnet18.joblib 2>&1 | tee train_resnet.log
 ```
 
 GPU를 쓰는 동안 다른 터미널에서 `watch -n 2 nvidia-smi`로 확인합니다. 끝낼 때는 `Ctrl+C`입니다.

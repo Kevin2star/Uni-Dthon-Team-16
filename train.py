@@ -12,6 +12,14 @@ Test는 읽지 않습니다.
 """
 from __future__ import annotations
 
+import os
+
+os.environ.setdefault('OMP_NUM_THREADS', '2')
+os.environ.setdefault('MKL_NUM_THREADS', '2')
+os.environ.setdefault('OPENBLAS_NUM_THREADS', '2')
+os.environ.setdefault('NUMEXPR_NUM_THREADS', '2')
+os.environ.setdefault('UNID_N_JOBS', '2')
+
 import argparse
 import shutil
 import traceback
@@ -186,6 +194,7 @@ def _run_epoch(network, optimizer, indices, paths, tabular, sequences, mask, y, 
 
 def _train_one_torch(config, frame, paths, features, y, sequence_cols, train_idx, holdout_idx, args, seed):
     import torch
+    M.limit_torch_threads()
     M.set_seed(seed)
     network, normalize = M.build_fusion(config, pretrained=True)
     config['normalize'] = normalize
@@ -227,6 +236,7 @@ def _train_one_torch(config, frame, paths, features, y, sequence_cols, train_idx
 
 def _train_final_torch(config, frame, paths, features, y, sequence_cols, epochs, args, seed):
     import torch
+    M.limit_torch_threads()
     M.set_seed(seed)
     network, normalize = M.build_fusion(config, pretrained=True)
     config['normalize'] = normalize

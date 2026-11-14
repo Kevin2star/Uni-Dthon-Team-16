@@ -7,6 +7,7 @@ train.py, test.py, 실험 노트북이 같은 함수를 사용합니다.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -134,8 +135,25 @@ def _image_stats(path) -> list[float]:
     ]
 
 
-def extract_image_features(frame: pd.DataFrame, paths: pd.Series, n_jobs: int = -1) -> pd.DataFrame:
-    rows = Parallel(n_jobs=n_jobs, batch_size=64)(delayed(_image_stats)(path) for path in paths)
+def cpu_jobs(n_jobs: int | None = None) -> int:
+    """공용 서버에서 이미지 피처가 코어를 전부 쓰지 않도록 기본 2개만 씁니다."""
+    if n_jobs is None:
+        return max(1, int(os.environ.get('UNID_N_JOBS', '2')))
+    return n_jobs
+
+
+def limit_torch_threads() -> None:
+    torch, _ = _import_torch()
+    threads = cpu_jobs()
+    torch.set_num_threads(threads)
+    try:
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        pass
+
+
+def extract_image_features(frame: pd.DataFrame, paths: pd.Series, n_jobs: int | None = None) -> pd.DataFrame:
+    rows = Parallel(n_jobs=cpu_jobs(n_jobs), batch_size=64)(delayed(_image_stats)(path) for path in paths)
     return pd.DataFrame(rows, columns=IMAGE_STATS, index=pd.Index(frame['sample_id'].to_numpy(), name='sample_id'))
 
 
@@ -679,6 +697,7 @@ def _sensor_matrix(frame: pd.DataFrame, columns: list[str]) -> np.ndarray:
 
 def _predict_torch(bundle: dict, frame: pd.DataFrame, paths: pd.Series, features: pd.DataFrame, batch_size: int) -> np.ndarray:
     torch, _ = _import_torch()
+    limit_torch_threads()
     network, normalize = build_fusion(bundle['config'], pretrained=False)
     network.load_state_dict(bundle['state_dict'])
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
