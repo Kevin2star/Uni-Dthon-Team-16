@@ -368,8 +368,8 @@ def main():
                     cv_mean, cv_std, class_f1, oof = cross_validate(name, features, y, groups, class_weight, args.seed, folds)
                     oof_path = weight_dir / f'{name}_oof.npz'
                     np.savez_compressed(
-                        oof_path, proba=oof, sample_id=train['sample_id'].astype(str).to_numpy(),
-                        label=y.to_numpy(), experiment_id=train['experiment_id'].astype(str).to_numpy(),
+                        oof_path, proba=oof, sample_id=M.as_text(train['sample_id']),
+                        label=y.to_numpy(), experiment_id=M.as_text(train['experiment_id']),
                     )
                     print('홀드아웃 확률:', oof_path)
                     print(format_row(name, cv_mean, cv_std, class_f1, float('nan')))
@@ -385,8 +385,8 @@ def main():
             if oof is not None:
                 oof_path = candidate.with_name(f'{stem}_oof.npz')
                 np.savez_compressed(
-                    oof_path, proba=oof, sample_id=train['sample_id'].astype(str).to_numpy(),
-                    label=y.to_numpy(), experiment_id=train['experiment_id'].astype(str).to_numpy(),
+                    oof_path, proba=oof, sample_id=M.as_text(train['sample_id']),
+                    label=y.to_numpy(), experiment_id=M.as_text(train['experiment_id']),
                 )
                 print('홀드아웃 확률:', oof_path)
             val_f1, _ = score_validation(bundle, validation, args.data_dir)

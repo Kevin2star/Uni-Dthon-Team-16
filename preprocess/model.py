@@ -44,6 +44,11 @@ GAS_COLUMNS = {
     'meas_n2o', 'meas_no', 'meas_no2', 'meas_so2',
 }
 ID_COLUMNS = {'sample_id', 'experiment_id', 'image_path', 'label', 'relative_time_s'}
+
+
+def as_text(values) -> np.ndarray:
+    """고정 길이 유니코드 배열. pandas 문자열을 그대로 저장하면 np.load가 거부합니다."""
+    return np.array([str(item) for item in np.asarray(values).reshape(-1)], dtype='U')
 # 고정 색상표. 데이터로 맞추지 않습니다.
 # 찬 쪽은 자홍(색상 300도)이고, 색상이 내려가며 파랑·청록·초록·노랑·빨강으로 뜨거워집니다.
 # 채도가 낮은 밝은 픽셀은 그 색상표의 흰색 끝입니다.
@@ -59,6 +64,7 @@ DEEP_MODELS = [
     'efficientnet', 'resnet18', 'resnet18_gapgmp', 'mobilenet', 'smallcnn',
     'cnn1d', 'convnext_tiny', 'swin_t', 'swin_t_time',
     'deit_small', 'dinov2_vits14', 'maxvit_tiny', 'mobilevit_s', 'gru_efficientnet',
+    'cross_attn',
 ]
 COMPARE_DEEP_MODELS = ['efficientnet', 'resnet18', 'mobilenet', 'smallcnn']
 COMBINATION_MODELS = ['ensemble']
@@ -339,6 +345,33 @@ def _from_start(times: np.ndarray, values: np.ndarray) -> np.ndarray:
     return values - anchor
 
 
+# 실험 시작점 대비 상승이 이 값을 처음 넘은 뒤의 경과 시간(초).
+# 온도는 섭씨, 뜨거운 면적은 비율 포인트입니다. Validation으로 고르지 않습니다.
+RISE_LEVELS = {
+    'meas_t1': (10.0, 30.0, 50.0),
+    'img_hot90': (0.05, 0.10, 0.20),
+}
+
+
+def rise_column(signal: str, level: float) -> str:
+    if signal == 'meas_t1':
+        return f'{signal}_since{int(level)}c'
+    return f'{signal}_since{int(round(level * 100)):02d}'
+
+
+def _seconds_since_rise(times: np.ndarray, rise: np.ndarray, level: float) -> np.ndarray:
+    """처음 기준을 넘은 시각부터 현재까지의 초. 넘기 전에는 0이고, 미래는 보지 않습니다."""
+    out = np.zeros(len(times), dtype=np.float64)
+    crossed_at = None
+    for index in range(len(times)):
+        value = rise[index]
+        if crossed_at is None and np.isfinite(value) and np.isfinite(times[index]) and value >= level:
+            crossed_at = float(times[index])
+        if crossed_at is not None and np.isfinite(times[index]):
+            out[index] = float(times[index]) - crossed_at
+    return out
+
+
 def add_causal_features(base: pd.DataFrame, signals: list[str], slope_signals: list[str]) -> pd.DataFrame:
     columns = []
     for signal in signals:
@@ -348,6 +381,8 @@ def add_causal_features(base: pd.DataFrame, signals: list[str], slope_signals: l
             if signal in slope_signals:
                 columns.append(f'{signal}_slope{width}s')
         columns.append(f'{signal}_from_start')
+        for level in RISE_LEVELS.get(signal, ()):
+            columns.append(rise_column(signal, level))
     out = pd.DataFrame(np.nan, index=base.index, columns=columns)
     times_all = base['relative_time_s'].to_numpy(dtype=float)
     for _, positions in base.groupby('experiment_id', sort=False).indices.items():
@@ -358,6 +393,9 @@ def add_causal_features(base: pd.DataFrame, signals: list[str], slope_signals: l
             means, maxima, deltas, slopes = _causal_multi(times, values, WINDOWS)
             start = _from_start(times, values)
             out.iloc[positions, out.columns.get_loc(f'{signal}_from_start')] = start
+            for level in RISE_LEVELS.get(signal, ()):
+                elapsed = _seconds_since_rise(times, start, level)
+                out.iloc[positions, out.columns.get_loc(rise_column(signal, level))] = elapsed
             for k, window in enumerate(WINDOWS):
                 width = int(window)
                 out.iloc[positions, out.columns.get_loc(f'{signal}_mean{width}s')] = means[k]
@@ -366,6 +404,23 @@ def add_causal_features(base: pd.DataFrame, signals: list[str], slope_signals: l
                 if signal in slope_signals:
                     out.iloc[positions, out.columns.get_loc(f'{signal}_slope{width}s')] = slopes[k]
     return out
+
+
+def enforce_causal_monotone(frame: pd.DataFrame, labels) -> np.ndarray:
+    """같은 실험에서 예측이 직전 단계보다 낮으면 직전 단계로 올립니다. 미래 예측은 쓰지 않습니다."""
+    labels = np.asarray(labels, dtype=int).copy()
+    work = pd.DataFrame({
+        'experiment_id': frame['experiment_id'].astype(str).to_numpy(),
+        'relative_time_s': pd.to_numeric(frame['relative_time_s'], errors='coerce').to_numpy(),
+        'row': np.arange(len(labels)),
+    })
+    for _, sub in work.groupby('experiment_id', sort=False):
+        sub = sub.sort_values(['relative_time_s', 'row'], kind='mergesort')
+        running = 0
+        for row in sub['row'].to_numpy():
+            running = max(running, int(labels[row]))
+            labels[row] = running
+    return labels
 
 
 def numeric(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
@@ -715,6 +770,9 @@ def deep_config(name: str) -> dict:
     """백본, 센서 시퀀스, 이미지 사용, 시점 수를 반환합니다. GRU는 새 실험에서 쓰지 않습니다."""
     if name == 'gru_efficientnet':
         return {'backbone': 'efficientnet', 'sequence': 'gru', 'image': True, 'frames': 1}
+    if name == 'cross_attn':
+        # 이미지 위치 특징과 과거→현재 센서. 미래 시점은 시퀀스에 넣지 않습니다.
+        return {'backbone': 'resnet18_tokens', 'sequence': 'cross', 'image': True, 'frames': 1}
     if name == 'cnn1d':
         return {'backbone': None, 'sequence': 'cnn1d', 'image': False, 'frames': 1}
     if name == 'swin_t_time':
@@ -798,6 +856,24 @@ def build_backbone(name: str, pretrained: bool):
                 return torch.cat([self.avg(x).flatten(1), self.mx(x).flatten(1)], dim=1)
 
         return _GapGmp(net), 1024, 'imagenet'
+    if name == 'resnet18_tokens':
+        from torchvision.models import ResNet18_Weights, resnet18
+        weights = ResNet18_Weights.IMAGENET1K_V1 if pretrained else None
+        net = resnet18(weights=weights)
+
+        class _Tokens(nn.Module):
+            """전역 풀링 이전의 위치별 특징. Cross-Attention의 이미지 쪽 입력입니다."""
+
+            def __init__(self, resnet):
+                super().__init__()
+                self.conv1, self.bn1, self.relu, self.maxpool = resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool
+                self.layer1, self.layer2, self.layer3, self.layer4 = resnet.layer1, resnet.layer2, resnet.layer3, resnet.layer4
+
+            def forward(self, x):
+                x = self.maxpool(self.relu(self.bn1(self.conv1(x))))
+                return self.layer4(self.layer3(self.layer2(self.layer1(x))))
+
+        return _Tokens(net), 512, 'imagenet'
     if name == 'mobilenet':
         from torchvision.models import MobileNet_V3_Small_Weights, mobilenet_v3_small
         weights = MobileNet_V3_Small_Weights.IMAGENET1K_V1 if pretrained else None
@@ -842,6 +918,17 @@ class FusionNet(object):
                 self.head_kind = head
                 self.freeze_backbone = False
                 fused = 0
+                if sequence == 'cross':
+                    # 센서는 과거에서 현재로만 진행하는 GRU입니다. 양방향은 쓰지 않습니다.
+                    self.img_proj = nn.Linear(image_dim, 128)
+                    self.gru = nn.GRU(sensor_dim, 128, batch_first=True)
+                    self.cross = nn.MultiheadAttention(128, num_heads=4, dropout=0.1, batch_first=True)
+                    fused = 256
+                    if tabular_dim:
+                        self.tabular = nn.Sequential(nn.Linear(tabular_dim, 128), nn.ReLU(), nn.Dropout(0.2))
+                        fused += 128
+                    self.classifier = nn.Linear(fused, 5 if head == 'coral' else 6)
+                    return
                 if self.use_image:
                     self.img_proj = nn.Linear(image_dim, 128)
                     fused += 128
@@ -874,6 +961,20 @@ class FusionNet(object):
                 return self.img_proj(self.backbone(image))
 
             def forward(self, image, tabular, seq=None, mask=None):
+                if self.sequence == 'cross':
+                    feature_map = self.backbone(image)
+                    tokens = self.img_proj(feature_map.flatten(2).transpose(1, 2))
+                    lengths = mask.sum(dim=1).clamp(min=1).cpu()
+                    packed = nn.utils.rnn.pack_padded_sequence(seq, lengths, batch_first=True, enforce_sorted=False)
+                    output, _ = self.gru(packed)
+                    output, _ = nn.utils.rnn.pad_packed_sequence(output, batch_first=True, total_length=seq.size(1))
+                    attended, _ = self.cross(output, tokens, tokens)
+                    weight = mask.unsqueeze(-1)
+                    sensor_pool = (attended * weight).sum(dim=1) / weight.sum(dim=1).clamp(min=1)
+                    parts = [sensor_pool, tokens.mean(dim=1)]
+                    if self.tabular_dim:
+                        parts.append(self.tabular(tabular))
+                    return self.classifier(torch.cat(parts, dim=1))
                 parts = []
                 if self.use_image:
                     if self.frames == 1:
@@ -942,6 +1043,7 @@ PRETRAINED_MODELS = {
     'maxvit_tiny': 'timm maxvit_tiny_tf_224.in1k, ImageNet-1K, Apache-2.0',
     'mobilevit_s': 'timm mobilevit_s.cvnets_in1k, ImageNet-1K, Apache-2.0',
     'gru_efficientnet': 'torchvision efficientnet_b0, ImageNet-1K V1, BSD-3-Clause + 과거 센서 GRU',
+    'cross_attn': 'torchvision resnet18, ImageNet-1K V1, BSD-3-Clause. 위치 특징과 과거→현재 센서 GRU의 Cross-Attention',
     'cnn1d': '사전학습 가중치 없음. 과거 300초 센서만 사용',
     'smallcnn': '사전학습 가중치 없음',
 }

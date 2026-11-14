@@ -37,13 +37,13 @@ def load_oof(path: Path) -> pd.DataFrame:
             '표 모델은 python train.py --model <이름> --oof_only 로 만들고, '
             '딥러닝은 일반 학습이 같은 이름의 npz를 저장합니다. Test로 비중을 맞추지 않습니다.'
         )
-    data = np.load(npz_path)
+    data = np.load(npz_path, allow_pickle=True)
     frame = pd.DataFrame(np.asarray(data['proba'], dtype=np.float64))
-    frame['sample_id'] = np.asarray(data['sample_id']).astype(str)
+    frame['sample_id'] = M.as_text(data['sample_id'])
     frame['label'] = np.asarray(data['label']).astype(int)
     if 'experiment_id' not in data.files:
         raise SystemExit(f'{npz_path}에 experiment_id가 없습니다. 홀드아웃 확률을 다시 저장해야 스택을 확인할 수 있습니다.')
-    frame['experiment_id'] = np.asarray(data['experiment_id']).astype(str)
+    frame['experiment_id'] = M.as_text(data['experiment_id'])
     return frame
 
 

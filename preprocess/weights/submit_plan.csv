@@ -1,0 +1,4 @@
+order,file,exists,role,reason
+1,submission_ensemble_lightgbm_xgboost.csv,True,부스팅 조합,Validation 0.8272. LightGBM 0.60 + XGBoost 0.40
+2,submission_ensemble_extratrees_catboost.csv,True,교차검증 1위,Train Macro F1 0.8929. ExtraTrees 0.75 + CatBoost 0.25
+3,submission_extratrees_tuned.csv,True,공개 점수 기준,튜닝 ExtraTrees. 이미 제출했다면 이 슬롯은 건너뜁니다.
