@@ -1,0 +1,10 @@
+# 대회 데이터와 데이터에서 만든 파일은 저장소에 올리지 않는다
+data/
+battery_data_light/
+*.tar
+work/
+submissions/
+*.csv
+model_debug.joblib
+__pycache__/
+.DS_Store
