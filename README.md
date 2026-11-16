@@ -89,3 +89,15 @@ python selfcheck.py --input $D/validation/validation.csv --image_root $D/validat
 
 ## 주의
 - XGBoost를 GPU(`device='cuda'`)로 학습했습니다. `train.py --device cpu`로도 실행되지만 결과가 조금 달라질 수 있습니다. 저장된 가중치로 `test.py`만 실행하면 장치와 무관하게 같은 예측이 나옵니다.
+
+## Experiment Branches
+
+The `main` branch contains the final submission.
+Individual experiments, model development, and
+analysis results are maintained in separate branches.
+
+| Member | Experiment Branch |
+| --- | --- |
+| Yeonwoo | [yeonwoo](../../tree/yeonwoo) |
+| Hwanhee | [hwanhee](../../tree/hwanhee) |
+| Minjun | [jangminjun](../../tree/jangminjun) |
